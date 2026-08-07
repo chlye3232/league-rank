@@ -1,4 +1,4 @@
-name: Refresh and deploy league rankings
+name: Refresh league rankings
 
 on:
   schedule:
@@ -233,14 +233,13 @@ jobs:
         if: steps.direct-record.outputs.publish == 'true' || steps.proxy-record.outputs.publish == 'true' || steps.delayed-record.outputs.publish == 'true'
         run: python build_static_site.py
 
-      - name: Deploy public directory and refresh API to Cloudflare Pages
+      - name: Upload ranking JSON to Cloudflare KV
         if: steps.direct-record.outputs.publish == 'true' || steps.proxy-record.outputs.publish == 'true' || steps.delayed-record.outputs.publish == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy public --project-name=${{ vars.CLOUDFLARE_PROJECT_NAME }}
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          command: kv key put rankings --namespace-id=${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }} --path=public/data/rankings.json --remote
 
       - name: Save private refresh state
         if: always()
