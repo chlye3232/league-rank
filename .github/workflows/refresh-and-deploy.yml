@@ -2,9 +2,25 @@ name: Refresh and deploy league rankings
 
 on:
   schedule:
-    - cron: "17 * * * *"
-    - cron: "22 * * * *"
+    # Stagger groups so they do not normally start at the same time.
+    - cron: "45 */2 * * *"                         # A: every 2 hours
+    - cron: "25 0,3,6,9,12,15,18,21 * * *"       # B: every 90 minutes (part 1)
+    - cron: "55 1,4,7,10,13,16,19,22 * * *"      # B: every 90 minutes (part 2)
+    - cron: "15 * * * *"                          # C: every hour
+    - cron: "5,35 * * * *"                        # D: every 30 minutes
   workflow_dispatch:
+    inputs:
+      group:
+        description: "League group to refresh"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - A
+          - B
+          - C
+          - D
 
 permissions:
   contents: read
@@ -17,24 +33,28 @@ concurrency:
 jobs:
   refresh-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
 
-      - name: Determine run mode
-        id: mode
+      - name: Select scheduled league group
+        id: group
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "22 * * * *" ]; then
-            echo "value=retry" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=full" >> "$GITHUB_OUTPUT"
-          fi
+          schedule="${{ github.event.schedule }}"
+          case "$schedule" in
+            "45 */2 * * *") value="A" ;;
+            "25 0,3,6,9,12,15,18,21 * * *"|"55 1,4,7,10,13,16,19,22 * * *") value="B" ;;
+            "15 * * * *") value="C" ;;
+            "5,35 * * * *") value="D" ;;
+            *) value="${{ inputs.group || 'all' }}" ;;
+          esac
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "선택 그룹: $value"
 
       - name: Restore private refresh state
-        id: restore-state
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -49,7 +69,7 @@ jobs:
       - name: Initialize cached state
         shell: bash
         run: |
-          mkdir -p output
+          mkdir -p output logs
           if [ ! -f output/league-anchors.json ]; then
             cp seed/league-anchors.json output/league-anchors.json
           fi
@@ -57,24 +77,21 @@ jobs:
             cp seed/id_cache.json id_cache.json
           fi
 
-      - name: Check retry target
-        id: retry-target
-        if: steps.mode.outputs.value == 'retry'
-        run: python refresh_state.py prepare-retry
-
       - name: Set up Python
-        if: steps.mode.outputs.value == 'full' || steps.retry-target.outputs.needed == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install collector dependencies
-        if: steps.mode.outputs.value == 'full' || steps.retry-target.outputs.needed == 'true'
         run: python -m pip install -r requirements.txt
 
-      - name: Prepare proxy rotation
-        if: steps.mode.outputs.value == 'full' || steps.retry-target.outputs.needed == 'true'
+      - name: Prepare league target
+        id: target
+        run: python refresh_state.py prepare --group "${{ steps.group.outputs.value }}"
+
+      - name: Prepare optional purchased proxies
+        id: proxies
         shell: bash
         env:
           PROXY_1: ${{ secrets.PROXY_1 }}
@@ -84,74 +101,140 @@ jobs:
           PROXY_5: ${{ secrets.PROXY_5 }}
         run: |
           proxies=""
+          count=0
           for value in "$PROXY_1" "$PROXY_2" "$PROXY_3" "$PROXY_4" "$PROXY_5"; do
             [ -z "$value" ] && continue
             echo "::add-mask::$value"
             if [ -z "$proxies" ]; then proxies="$value"; else proxies="$proxies,$value"; fi
+            count=$((count + 1))
           done
-          echo "TIKTOK_PROXY_URLS=$proxies" >> "$GITHUB_ENV"
+          echo "PURCHASED_PROXY_URLS=$proxies" >> "$GITHUB_ENV"
+          if [ "$count" -gt 0 ]; then echo "available=true" >> "$GITHUB_OUTPUT"; else echo "available=false" >> "$GITHUB_OUTPUT"; fi
+          echo "구매 프록시: ${count}개"
 
-      - name: Refresh all TikTok leagues
-        id: full-refresh
-        if: steps.mode.outputs.value == 'full'
+      - name: Refresh directly without proxy
+        id: direct-refresh
         shell: bash
         env:
           TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+          TIKTOK_PROXY_URLS: ""
         run: |
-          mkdir -p logs
-          log_file="logs/run-${GITHUB_RUN_ID}-full.log"
-          set +e
-          python league_rank_updater.py --max-tries 20 --delay 0.35 2>&1 | tee "$log_file"
-          status=${PIPESTATUS[0]}
-          set -e
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
-
-      - name: Record full refresh result
-        id: full-record
-        if: always() && steps.mode.outputs.value == 'full'
-        shell: bash
-        run: |
-          status="${{ steps.full-refresh.outputs.exit_code }}"
-          [ -n "$status" ] || status=1
-          python refresh_state.py record-full --exit-code "$status" --log-file "${{ steps.full-refresh.outputs.log_file }}"
-
-      - name: Retry only failed leagues
-        id: retry-refresh
-        if: steps.mode.outputs.value == 'retry' && steps.retry-target.outputs.needed == 'true'
-        shell: bash
-        env:
-          TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
-        run: |
-          mkdir -p logs
-          log_file="logs/run-${GITHUB_RUN_ID}-retry.log"
-          IFS=',' read -r -a leagues <<< "${{ steps.retry-target.outputs.leagues }}"
+          log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-direct.log"
+          IFS=',' read -r -a leagues <<< "${{ steps.target.outputs.leagues }}"
           args=()
-          for league in "${leagues[@]}"; do
-            args+=(--league "$league")
-          done
+          for league in "${leagues[@]}"; do args+=(--league "$league"); done
           set +e
-          python league_rank_updater.py "${args[@]}" --max-tries 20 --delay 0.35 2>&1 | tee "$log_file"
+          python league_rank_updater.py "${args[@]}" --max-tries 50 --delay 0.35 2>&1 | tee "$log_file"
           status=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
 
-      - name: Record and merge retry result
-        id: retry-record
-        if: always() && steps.mode.outputs.value == 'retry' && steps.retry-target.outputs.needed == 'true'
+      - name: Record direct result
+        id: direct-record
+        if: always()
         shell: bash
         run: |
-          status="${{ steps.retry-refresh.outputs.exit_code }}"
+          status="${{ steps.direct-refresh.outputs.exit_code }}"
           [ -n "$status" ] || status=1
-          python refresh_state.py record-retry --exit-code "$status" --log-file "${{ steps.retry-refresh.outputs.log_file }}"
+          python refresh_state.py record-attempt \
+            --group "${{ steps.group.outputs.value }}" \
+            --phase direct \
+            --leagues "${{ steps.target.outputs.leagues }}" \
+            --exit-code "$status" \
+            --log-file "${{ steps.direct-refresh.outputs.log_file }}"
+
+      - name: Retry direct failures through purchased proxy
+        id: proxy-refresh
+        if: steps.direct-record.outputs.failed_count != '0' && steps.proxies.outputs.available == 'true'
+        shell: bash
+        env:
+          TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+        run: |
+          export TIKTOK_PROXY_URLS="$PURCHASED_PROXY_URLS"
+          log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-proxy.log"
+          IFS=',' read -r -a leagues <<< "${{ steps.direct-record.outputs.failed }}"
+          args=()
+          for league in "${leagues[@]}"; do args+=(--league "$league"); done
+          set +e
+          python league_rank_updater.py "${args[@]}" --max-tries 50 --delay 0.35 2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
+
+      - name: Record proxy result
+        id: proxy-record
+        if: always() && steps.proxy-refresh.outcome != 'skipped'
+        shell: bash
+        run: |
+          status="${{ steps.proxy-refresh.outputs.exit_code }}"
+          [ -n "$status" ] || status=1
+          python refresh_state.py record-attempt \
+            --group "${{ steps.group.outputs.value }}" \
+            --phase proxy \
+            --leagues "${{ steps.direct-record.outputs.failed }}" \
+            --exit-code "$status" \
+            --log-file "${{ steps.proxy-refresh.outputs.log_file }}"
+
+      - name: Select delayed retry target
+        id: delayed-target
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.proxy-refresh.outcome }}" != "skipped" ]; then
+            leagues="${{ steps.proxy-record.outputs.failed }}"
+          else
+            leagues="${{ steps.direct-record.outputs.failed }}"
+          fi
+          if [ -n "$leagues" ]; then needed=true; else needed=false; fi
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          echo "leagues=$leagues" >> "$GITHUB_OUTPUT"
+
+      - name: Wait five minutes before final retry
+        if: steps.delayed-target.outputs.needed == 'true'
+        shell: bash
+        run: sleep 300
+
+      - name: Final retry after five minutes
+        id: delayed-refresh
+        if: steps.delayed-target.outputs.needed == 'true'
+        shell: bash
+        env:
+          TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+        run: |
+          export TIKTOK_PROXY_URLS="$PURCHASED_PROXY_URLS"
+          log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-delayed.log"
+          IFS=',' read -r -a leagues <<< "${{ steps.delayed-target.outputs.leagues }}"
+          args=()
+          for league in "${leagues[@]}"; do args+=(--league "$league"); done
+          set +e
+          python league_rank_updater.py "${args[@]}" --max-tries 50 --delay 0.35 2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
+
+      - name: Record delayed retry result
+        id: delayed-record
+        if: always() && steps.delayed-refresh.outcome != 'skipped'
+        shell: bash
+        run: |
+          status="${{ steps.delayed-refresh.outputs.exit_code }}"
+          [ -n "$status" ] || status=1
+          python refresh_state.py record-attempt \
+            --group "${{ steps.group.outputs.value }}" \
+            --phase delayed \
+            --leagues "${{ steps.delayed-target.outputs.leagues }}" \
+            --exit-code "$status" \
+            --log-file "${{ steps.delayed-refresh.outputs.log_file }}"
 
       - name: Build sanitized static site
-        if: steps.full-record.outputs.publish == 'true' || steps.retry-record.outputs.publish == 'true'
+        if: steps.direct-record.outputs.publish == 'true' || steps.proxy-record.outputs.publish == 'true' || steps.delayed-record.outputs.publish == 'true'
         run: python build_static_site.py
 
-      - name: Deploy public directory to Cloudflare Pages
-        if: steps.full-record.outputs.publish == 'true' || steps.retry-record.outputs.publish == 'true'
+      - name: Deploy public directory and refresh API to Cloudflare Pages
+        if: steps.direct-record.outputs.publish == 'true' || steps.proxy-record.outputs.publish == 'true' || steps.delayed-record.outputs.publish == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -160,7 +243,7 @@ jobs:
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save private refresh state
-        if: always() && (steps.mode.outputs.value == 'full' || steps.retry-target.outputs.needed == 'true')
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
@@ -171,10 +254,10 @@ jobs:
           key: league-state-${{ github.run_id }}
 
       - name: Upload private refresh record
-        if: always() && (steps.mode.outputs.value == 'full' || steps.retry-target.outputs.needed == 'true')
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: league-refresh-${{ github.run_id }}
+          name: league-refresh-${{ github.run_id }}-${{ steps.group.outputs.value }}
           path: |
             logs/refresh-history.jsonl
             logs/run-${{ github.run_id }}-*.log
@@ -183,6 +266,6 @@ jobs:
           retention-days: 90
 
       - name: Report unresolved collection failure
-        if: always() && (steps.full-record.outputs.fatal == 'true' || steps.retry-record.outputs.unresolved == 'true')
+        if: always() && steps.delayed-record.outputs.failed_count != '' && steps.delayed-record.outputs.failed_count != '0'
         shell: bash
         run: exit 1
