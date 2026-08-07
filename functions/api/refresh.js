@@ -81,8 +81,12 @@ export async function onRequest({ request, env }) {
   }
 
   const required = ["GITHUB_ACTIONS_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
-  if (required.some((name) => !env[name])) {
-    return jsonResponse({ detail: "직접 갱신 서버 설정이 완료되지 않았습니다." }, 503);
+  const missing = required.filter((name) => !String(env[name] || "").trim());
+  if (missing.length) {
+    return jsonResponse(
+      { detail: `직접 갱신 서버 설정 누락: ${missing.join(", ")}` },
+      503,
+    );
   }
 
   if (hasCooldownCookie(request) || await isIpCoolingDown(request)) {
