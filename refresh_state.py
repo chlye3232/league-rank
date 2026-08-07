@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Keep private refresh history and merge one-time league retries."""
+"""Prepare grouped refreshes, merge partial results, and keep private history."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,14 +38,17 @@ LEAGUE_CLASS_TYPES: dict[str, int] = {
     "D5": 100,
 }
 LEAGUE_CODES = list(LEAGUE_CLASS_TYPES)
+GROUP_LEAGUES = {
+    "A": ["A1", "A2", "A3"],
+    "B": ["B1", "B2", "B3", "B4", "B5"],
+    "C": ["C1", "C2", "C3", "C4", "C5"],
+    "D": ["D1", "D2", "D3", "D4", "D5"],
+    "all": LEAGUE_CODES,
+}
 
 
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def next_retry_slot(value: datetime) -> datetime:
-    return value + timedelta(minutes=5)
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -79,7 +82,7 @@ def write_github_outputs(**values: Any) -> None:
             output.write(f"{key}={value}\n")
 
 
-def write_step_summary(title: str, successful: list[str], failed: list[str], note: str = "") -> None:
+def write_step_summary(title: str, successful: list[str], failed: list[str]) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
@@ -89,17 +92,22 @@ def write_step_summary(title: str, successful: list[str], failed: list[str], not
         f"- 성공: {', '.join(successful) if successful else '없음'}",
         f"- 실패: {', '.join(failed) if failed else '없음'}",
     ]
-    if note:
-        lines.append(f"- {note}")
     with Path(path).open("a", encoding="utf-8") as summary:
         summary.write("\n".join(lines) + "\n")
 
 
-def valid_leagues(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    selected = {str(value).upper() for value in values}
-    return [league for league in LEAGUE_CODES if league in selected]
+def parse_leagues(value: str) -> list[str]:
+    requested = {item.strip().upper() for item in value.split(",") if item.strip()}
+    selected = [league for league in LEAGUE_CODES if league in requested]
+    if not selected or len(selected) != len(requested):
+        raise SystemExit("올바르지 않은 리그 목록입니다")
+    return selected
+
+
+def snapshot_path(selected: list[str]) -> Path:
+    if selected == LEAGUE_CODES:
+        return LATEST_SNAPSHOT
+    return OUTPUT_DIR / ("partial-" + "-".join(selected).lower() + ".json")
 
 
 def snapshot_successes(snapshot: Any, selected: list[str]) -> list[str]:
@@ -116,63 +124,18 @@ def snapshot_successes(snapshot: Any, selected: list[str]) -> list[str]:
     return [league for league in selected if league in succeeded]
 
 
-def record_full(exit_code: int, log_file: str) -> int:
-    recorded_at = now_utc()
-    snapshot = read_json(LATEST_SNAPSHOT, {})
-    successful = snapshot_successes(snapshot, LEAGUE_CODES) if exit_code in (0, 2) else []
-    failed = [league for league in LEAGUE_CODES if league not in successful]
-    publish = exit_code in (0, 2) and isinstance(snapshot, dict) and bool(snapshot.get("rows"))
-    retry_after = next_retry_slot(recorded_at) if failed else None
-
-    state = {
-        "version": 1,
-        "sourceRunId": os.environ.get("GITHUB_RUN_ID", "local"),
-        "recordedAt": recorded_at.isoformat(),
-        "firstExitCode": exit_code,
-        "pendingLeagues": failed,
-        "retryAfter": retry_after.isoformat() if retry_after else None,
-        "retryCompleted": not bool(failed),
-        "remainingFailedLeagues": [],
-    }
-    write_json_atomic(RETRY_STATE, state)
-    append_history(
-        {
-            "type": "full-refresh",
-            "runId": state["sourceRunId"],
-            "recordedAt": state["recordedAt"],
-            "exitCode": exit_code,
-            "successfulLeagues": successful,
-            "failedLeagues": failed,
-            "retryAfter": state["retryAfter"],
-            "logFile": Path(log_file).name if log_file else None,
-        }
-    )
-
-    note = "실패 리그는 약 5분 뒤 한 번 재시도합니다." if failed else "모든 리그가 갱신되었습니다."
-    write_step_summary("1시간 정기 갱신", successful, failed, note)
-    write_github_outputs(publish=publish, fatal=exit_code not in (0, 2), failed=bool(failed))
-    return 0
-
-
-def prepare_retry() -> int:
-    state = read_json(RETRY_STATE, {})
-    pending = valid_leagues(state.get("pendingLeagues")) if isinstance(state, dict) else []
-    completed = bool(state.get("retryCompleted")) if isinstance(state, dict) else True
-    needed = bool(pending) and not completed
-    write_github_outputs(needed=needed, leagues=",".join(pending))
-    if needed:
-        print("재시도 대상: " + ", ".join(pending))
-    else:
-        print("재시도할 실패 리그가 없습니다.")
-    return 0
-
-
-def merge_successful_retry(latest: dict[str, Any], partial: dict[str, Any], successful: list[str]) -> None:
+def merge_successes(latest: dict[str, Any], partial: dict[str, Any], successful: list[str]) -> None:
     successful_types = {LEAGUE_CLASS_TYPES[league] for league in successful}
     latest_rows = latest.get("rows", []) if isinstance(latest.get("rows"), list) else []
     partial_rows = partial.get("rows", []) if isinstance(partial.get("rows"), list) else []
-    merged_rows = [row for row in latest_rows if row.get("class_type") not in successful_types]
-    merged_rows.extend(row for row in partial_rows if row.get("class_type") in successful_types)
+    merged_rows = [
+        row for row in latest_rows
+        if isinstance(row, dict) and row.get("class_type") not in successful_types
+    ]
+    merged_rows.extend(
+        row for row in partial_rows
+        if isinstance(row, dict) and row.get("class_type") in successful_types
+    )
     merged_rows.sort(key=lambda row: (-int(row.get("class_type", 0)), int(row.get("rank", 999999))))
     latest["rows"] = merged_rows
 
@@ -184,89 +147,99 @@ def merge_successful_retry(latest: dict[str, Any], partial: dict[str, Any], succ
     latest["leagues"] = latest_leagues
 
     latest_summary = latest.get("summary", []) if isinstance(latest.get("summary"), list) else []
-    summary_by_league = {
+    summaries = {
         str(item.get("league", "")).upper(): item
         for item in latest_summary
         if isinstance(item, dict)
     }
     partial_summary = partial.get("summary", []) if isinstance(partial.get("summary"), list) else []
     for item in partial_summary:
-        if isinstance(item, dict) and str(item.get("league", "")).upper() in successful:
-            summary_by_league[str(item["league"]).upper()] = item
-    latest["summary"] = [summary_by_league[league] for league in LEAGUE_CODES if league in summary_by_league]
-    latest["lastRetryAt"] = now_utc().isoformat()
+        league = str(item.get("league", "")).upper() if isinstance(item, dict) else ""
+        if league in successful:
+            summaries[league] = item
+    latest["summary"] = [summaries[league] for league in LEAGUE_CODES if league in summaries]
+    latest["lastPartialRefreshAt"] = now_iso()
 
 
-def record_retry(exit_code: int, log_file: str) -> int:
-    recorded_at = now_utc()
-    state = read_json(RETRY_STATE, {})
-    selected = valid_leagues(state.get("pendingLeagues")) if isinstance(state, dict) else []
-    partial_path = OUTPUT_DIR / ("partial-" + "-".join(selected).lower() + ".json")
-    partial = read_json(partial_path, {}) if selected else {}
-    latest = read_json(LATEST_SNAPSHOT, {})
+def prepare(group: str) -> int:
+    normalized = group if group == "all" else group.upper()
+    selected = GROUP_LEAGUES.get(normalized)
+    if not selected:
+        raise SystemExit(f"알 수 없는 리그 그룹: {group}")
+    write_github_outputs(leagues=",".join(selected), count=len(selected))
+    print(f"{normalized} 그룹: {', '.join(selected)}")
+    return 0
 
-    successful = snapshot_successes(partial, selected) if exit_code in (0, 2) else []
-    if successful and isinstance(latest, dict) and isinstance(partial, dict):
-        merge_successful_retry(latest, partial, successful)
-        write_json_atomic(LATEST_SNAPSHOT, latest)
+
+def record_attempt(group: str, phase: str, league_value: str, exit_code: int, log_file: str) -> int:
+    selected = parse_leagues(league_value)
+    attempt_path = snapshot_path(selected)
+    attempt = read_json(attempt_path, {}) if exit_code in (0, 2) else {}
+    successful = snapshot_successes(attempt, selected)
     failed = [league for league in selected if league not in successful]
 
-    if not isinstance(state, dict):
-        state = {}
-    state.update(
-        {
-            "retryCompleted": True,
-            "retriedAt": recorded_at.isoformat(),
-            "retryExitCode": exit_code,
-            "pendingLeagues": [],
-            "remainingFailedLeagues": failed,
-        }
-    )
+    if successful and attempt_path != LATEST_SNAPSHOT:
+        latest = read_json(LATEST_SNAPSHOT, {})
+        if not isinstance(latest, dict) or not isinstance(attempt, dict):
+            successful = []
+            failed = selected
+        else:
+            merge_successes(latest, attempt, successful)
+            write_json_atomic(LATEST_SNAPSHOT, latest)
+
+    recorded_at = now_iso()
+    state = {
+        "version": 2,
+        "runId": os.environ.get("GITHUB_RUN_ID", "local"),
+        "group": group,
+        "phase": phase,
+        "recordedAt": recorded_at,
+        "exitCode": exit_code,
+        "attemptedLeagues": selected,
+        "successfulLeagues": successful,
+        "failedLeagues": failed,
+    }
     write_json_atomic(RETRY_STATE, state)
     append_history(
         {
-            "type": "five-minute-retry",
-            "runId": os.environ.get("GITHUB_RUN_ID", "local"),
-            "sourceRunId": state.get("sourceRunId"),
-            "recordedAt": recorded_at.isoformat(),
-            "exitCode": exit_code,
-            "attemptedLeagues": selected,
-            "successfulLeagues": successful,
-            "failedLeagues": failed,
+            "type": "league-refresh-attempt",
+            **state,
             "logFile": Path(log_file).name if log_file else None,
         }
     )
-
-    note = "재시도 후에도 실패한 리그는 다음 정기 갱신에서 다시 시도합니다." if failed else "재시도가 완료되었습니다."
-    write_step_summary("실패 리그 5분 후 재시도", successful, failed, note)
-    write_github_outputs(publish=bool(successful), unresolved=bool(failed), fatal=exit_code not in (0, 2))
+    write_step_summary(f"{group} 그룹 · {phase}", successful, failed)
+    write_github_outputs(
+        publish=bool(successful),
+        successful=",".join(successful),
+        failed=",".join(failed),
+        failed_count=len(failed),
+        fatal=exit_code not in (0, 2),
+    )
     return 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="비공개 리그 갱신 이력과 재시도 상태를 관리합니다")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="그룹별 리그 갱신 상태를 비공개로 관리합니다")
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    full = subparsers.add_parser("record-full")
-    full.add_argument("--exit-code", type=int, required=True)
-    full.add_argument("--log-file", default="")
+    prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--group", required=True)
 
-    subparsers.add_parser("prepare-retry")
-
-    retry = subparsers.add_parser("record-retry")
-    retry.add_argument("--exit-code", type=int, required=True)
-    retry.add_argument("--log-file", default="")
+    record = commands.add_parser("record-attempt")
+    record.add_argument("--group", required=True)
+    record.add_argument("--phase", choices=("direct", "proxy", "delayed"), required=True)
+    record.add_argument("--leagues", required=True)
+    record.add_argument("--exit-code", type=int, required=True)
+    record.add_argument("--log-file", default="")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.command == "record-full":
-        return record_full(args.exit_code, args.log_file)
-    if args.command == "prepare-retry":
-        return prepare_retry()
-    if args.command == "record-retry":
-        return record_retry(args.exit_code, args.log_file)
+    if args.command == "prepare":
+        return prepare(args.group)
+    if args.command == "record-attempt":
+        return record_attempt(args.group, args.phase, args.leagues, args.exit_code, args.log_file)
     return 2
 
 
