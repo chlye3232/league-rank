@@ -80,7 +80,7 @@ export async function onRequest({ request, env }) {
     return jsonResponse({ detail: "웹페이지의 직접 갱신 버튼을 이용해주세요." }, 403);
   }
 
-  const required = ["GITHUB_ACTIONS_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
+  const required = ["GITHUB_ACTIONS_TOKEN"];
   const missing = required.filter((name) => !String(env[name] || "").trim());
   if (missing.length) {
     return jsonResponse(
@@ -104,9 +104,11 @@ export async function onRequest({ request, env }) {
     body = {};
   }
   const group = ["all", "A", "B", "C", "D"].includes(body.group) ? body.group : "all";
+  const owner = String(env.GITHUB_OWNER || "chlye3232").trim();
+  const repo = String(env.GITHUB_REPO || "league-rank").trim();
   const workflow = env.GITHUB_WORKFLOW_FILE || "refresh-and-deploy.yml";
   const branch = env.GITHUB_BRANCH || "main";
-  const base = `https://api.github.com/repos/${encodeURIComponent(env.GITHUB_OWNER)}/${encodeURIComponent(env.GITHUB_REPO)}/actions/workflows/${encodeURIComponent(workflow)}`;
+  const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(workflow)}`;
 
   for (const status of ["queued", "in_progress"]) {
     const active = await githubRequest(`${base}/runs?status=${status}&per_page=1`, env.GITHUB_ACTIONS_TOKEN);
