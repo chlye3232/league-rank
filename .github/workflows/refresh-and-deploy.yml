@@ -239,7 +239,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: kv key put rankings --namespace-id=${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }} --path=public/data/rankings.json --remote
+          command: kv key put rankings --namespace-id=${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }} --path=public/data/rankings.json
 
       - name: Save private refresh state
         if: always()
