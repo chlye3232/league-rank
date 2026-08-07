@@ -25,26 +25,50 @@
 
 ## 2. Cloudflare Pages
 
-1. Cloudflare `Workers & Pages`에서 Direct Upload 방식의 Pages 프로젝트를 만듭니다.
+1. Cloudflare `Workers & Pages`에서 GitHub 저장소와 연결된 Pages 프로젝트를 만듭니다.
 2. Cloudflare API Token에는 필요한 계정의 `Cloudflare Pages: Edit` 권한만 부여합니다.
 3. 프로젝트 이름을 GitHub 변수 `CLOUDFLARE_PROJECT_NAME`과 똑같이 입력합니다.
 
 사이트 주소는 `https://<프로젝트명>.pages.dev`입니다.
 
+직접 갱신 버튼을 사용하려면 Pages 프로젝트 `Settings > Variables and Secrets`의 Production 환경에 다음 항목을 추가합니다.
+
+**Secrets**
+
+- `GITHUB_ACTIONS_TOKEN`: 해당 비공개 저장소 하나에만 접근하고 `Actions: Read and write` 권한만 가진 Fine-grained GitHub token
+
+**Variables**
+
+- `GITHUB_OWNER`: GitHub 사용자명 또는 조직명
+- `GITHUB_REPO`: 저장소 이름
+- `GITHUB_BRANCH`: `main`
+- `GITHUB_WORKFLOW_FILE`: `refresh-and-deploy.yml`
+
+GitHub 토큰은 브라우저로 전달되지 않고 Pages Function에서만 사용됩니다. 직접 갱신 버튼은 별도의 비밀번호 입력 없이 실행되며, 한 브라우저·IP에서는 10분에 한 번만 요청할 수 있고 이미 실행 중인 갱신이 있으면 중복 요청이 거부됩니다.
+
 ## 3. 갱신과 배포
 
-`.github/workflows/refresh-and-deploy.yml`이 약 1시간마다 다음 작업을 수행합니다.
+`.github/workflows/refresh-and-deploy.yml`이 그룹별 주기에 따라 다음 작업을 수행합니다.
 
 1. 저장된 스냅샷과 ID 캐시 복원
-2. 프록시 순환을 적용해 TikTok 리그 갱신
-3. 실패한 리그와 성공한 리그를 비공개 이력에 기록
-4. 실패한 리그가 있으면 약 5분 뒤 해당 리그만 한 번 재시도
+2. 프록시 없이 해당 그룹을 먼저 갱신
+3. 실패한 리그만 구매 프록시로 즉시 재시도
+4. 그래도 실패하면 5분 기다린 후 해당 리그만 마지막 재시도
 5. `rank`, `id`만 포함한 공개 JSON 생성
 6. `public/`만 Cloudflare Pages에 배포
 
-갱신 이력, 실패 목록과 실행 로그는 GitHub Actions의 실행 요약 및 비공개 아티팩트에 90일간 보관됩니다. 재시도 후에도 실패하면 기존 저장 데이터를 유지하고 다음 1시간 정기 갱신에서 다시 시도합니다. 이 기록들은 `public/`에 포함되지 않습니다.
+자동 갱신 주기는 다음과 같습니다.
 
-수동 갱신은 GitHub 저장소 `Actions > Refresh and deploy league rankings > Run workflow`에서 실행합니다.
+- A1~A3: 2시간
+- B1~B5: 1시간 30분
+- C1~C5: 1시간
+- D1~D5: 30분
+
+각 그룹은 서로 다른 분에 시작하도록 분산되어 있습니다. 한 그룹 안에서도 후보 ID를 동시에 요청하지 않고 최대 50명까지 순서대로 검사합니다.
+
+갱신 이력, 실패 목록과 실행 로그는 GitHub Actions의 실행 요약 및 비공개 아티팩트에 90일간 보관됩니다. 마지막 재시도 후에도 실패하면 기존 저장 데이터를 유지하고 해당 그룹의 다음 정기 갱신에서 다시 시도합니다. 이 기록들은 `public/`에 포함되지 않습니다.
+
+수동 갱신은 웹의 `직접 갱신` 버튼 또는 GitHub 저장소 `Actions > Refresh and deploy league rankings > Run workflow`에서 실행합니다. 웹 버튼은 전체 리그를 순차적으로 한 번 갱신합니다.
 
 ## 4. 로컬 확인
 
@@ -62,5 +86,8 @@ python -m http.server 8788 --directory public
 - `public/app.js`
 - `public/data/rankings.json`
 - `public/_headers`
+- `public/_routes.json`
 
 `public/data/rankings.json`에는 리그, 순위와 TikTok 아이디만 들어갑니다. 갱신 시각, 실패 기록과 실행 로그는 공개되지 않습니다.
+
+`functions/api/refresh.js`는 웹 버튼의 서버 측 API이며 GitHub 토큰과 갱신키 자체를 응답이나 정적 파일에 포함하지 않습니다.
