@@ -33,12 +33,16 @@
 
 ## 3. 갱신과 배포
 
-`.github/workflows/refresh-and-deploy.yml`이 약 4시간마다 다음 작업을 수행합니다.
+`.github/workflows/refresh-and-deploy.yml`이 약 1시간마다 다음 작업을 수행합니다.
 
 1. 저장된 스냅샷과 ID 캐시 복원
 2. 프록시 순환을 적용해 TikTok 리그 갱신
-3. `rank`, `id`만 포함한 공개 JSON 생성
-4. `public/`만 Cloudflare Pages에 배포
+3. 실패한 리그와 성공한 리그를 비공개 이력에 기록
+4. 실패한 리그가 있으면 약 5분 뒤 해당 리그만 한 번 재시도
+5. `rank`, `id`만 포함한 공개 JSON 생성
+6. `public/`만 Cloudflare Pages에 배포
+
+갱신 이력, 실패 목록과 실행 로그는 GitHub Actions의 실행 요약 및 비공개 아티팩트에 90일간 보관됩니다. 재시도 후에도 실패하면 기존 저장 데이터를 유지하고 다음 1시간 정기 갱신에서 다시 시도합니다. 이 기록들은 `public/`에 포함되지 않습니다.
 
 수동 갱신은 GitHub 저장소 `Actions > Refresh and deploy league rankings > Run workflow`에서 실행합니다.
 
@@ -59,4 +63,4 @@ python -m http.server 8788 --directory public
 - `public/data/rankings.json`
 - `public/_headers`
 
-`public/data/rankings.json`에는 리그, 순위, TikTok 아이디, 갱신 시각만 들어갑니다.
+`public/data/rankings.json`에는 리그, 순위와 TikTok 아이디만 들어갑니다. 갱신 시각, 실패 기록과 실행 로그는 공개되지 않습니다.

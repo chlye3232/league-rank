@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,16 +47,6 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def parse_time(value: Any) -> datetime:
-    if isinstance(value, str) and value:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
-
-
 def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -90,17 +79,13 @@ def build_public(snapshot: dict[str, Any]) -> dict[str, Any]:
     for items in grouped.values():
         items.sort(key=lambda item: item["rank"])
 
-    updated_at = parse_time(snapshot.get("resolvedAt"))
     leagues = [
         {"code": league, "count": len(grouped[league]), "items": grouped[league]}
         for league in LEAGUE_CLASS_TYPES
     ]
     return {
-        "leagueDate": snapshot.get("leagueDate"),
-        "updatedAt": updated_at.isoformat(),
         "total": sum(item["count"] for item in leagues),
         "leagues": leagues,
-        "refresh": {"nextRefreshAt": (updated_at + timedelta(hours=4)).isoformat()},
     }
 
 
