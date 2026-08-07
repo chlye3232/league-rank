@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f7fc" />
+    <title>리그 랭킹 ID</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="rank-card" aria-labelledby="page-title">
+        <header class="hero">
+          <p class="eyebrow">SAVED LEAGUE SNAPSHOT</p>
+          <h1 id="page-title">리그 랭킹 ID</h1>
+          <p class="hero-copy">리그를 누르면 현재 저장된 순위의 TikTok ID가 순서대로 복사됩니다.</p>
+        </header>
+
+        <section class="snapshot" aria-live="polite">
+          <div>
+            <span class="snapshot-label">최근 데이터</span>
+            <strong id="updated-at">불러오는 중</strong>
+          </div>
+          <div class="snapshot-right">
+            <span id="refresh-state" class="status-dot">저장 데이터 사용 중</span>
+            <span id="next-refresh">다음 갱신 계산 중</span>
+          </div>
+        </section>
+
+        <button id="copy-all" class="copy-all" type="button" disabled>
+          전체 리그 ID 복사
+          <span id="total-count">—</span>
+        </button>
+
+        <section class="league-section" aria-labelledby="league-heading">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">LEAGUE</p>
+              <h2 id="league-heading">리그별 ID 복사</h2>
+            </div>
+            <p>순위순 · 중복 제외</p>
+          </div>
+          <div id="league-grid" class="league-grid" aria-busy="true"></div>
+        </section>
+
+        <footer class="actions">
+          <p>GitHub Actions가 약 4시간 간격으로 데이터를 갱신합니다.</p>
+          <button id="refresh-button" class="refresh-button" type="button">저장 데이터 다시 불러오기</button>
+        </footer>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
