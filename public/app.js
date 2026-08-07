@@ -68,10 +68,32 @@ function render(data) {
 }
 
 async function loadRankings({ quiet = false } = {}) {
+  const sources = [
+    `/api/rankings?v=${Date.now()}`,
+    `./data/rankings.json?v=${Date.now()}`,
+  ];
+  let lastError = new Error("데이터를 불러오지 못했습니다.");
+
   try {
-    const response = await fetch(`./data/rankings.json?v=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) throw new Error((await response.json()).detail || "데이터를 불러오지 못했습니다.");
-    render(await response.json());
+    for (const source of sources) {
+      try {
+        const response = await fetch(source, { cache: "no-store" });
+        if (!response.ok) {
+          let detail = "데이터를 불러오지 못했습니다.";
+          try {
+            detail = (await response.json()).detail || detail;
+          } catch {
+            // Use the generic message and try the fallback source.
+          }
+          throw new Error(detail);
+        }
+        render(await response.json());
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
   } catch (error) {
     if (!quiet) showToast(error.message);
   }

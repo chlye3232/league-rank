@@ -14,20 +14,22 @@
 - `PROXY_1` ~ `PROXY_5` 중 사용하는 만큼
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_KV_NAMESPACE_ID`
 
 프록시 예시: `https://user:password@host:port`
-
-다음 **Repository variable**을 추가합니다.
-
-- `CLOUDFLARE_PROJECT_NAME`: Cloudflare Pages에서 만든 프로젝트명
 
 토큰이나 프록시는 `.env`, JavaScript, JSON, GitHub 코드에 직접 입력하지 마세요.
 
 ## 2. Cloudflare Pages
 
 1. Cloudflare `Workers & Pages`에서 GitHub 저장소와 연결된 Pages 프로젝트를 만듭니다.
-2. Cloudflare API Token에는 필요한 계정의 `Cloudflare Pages: Edit` 권한만 부여합니다.
-3. 프로젝트 이름을 GitHub 변수 `CLOUDFLARE_PROJECT_NAME`과 똑같이 입력합니다.
+2. `Workers & Pages > KV`에서 `league-rank-data`라는 KV 네임스페이스를 만듭니다.
+3. 생성된 KV 네임스페이스 ID를 GitHub Secret `CLOUDFLARE_KV_NAMESPACE_ID`에 넣습니다.
+4. Cloudflare API Token에는 해당 계정의 `Workers KV Storage: Edit` 권한을 부여합니다.
+5. Pages 프로젝트의 `Settings > Bindings`에서 Production KV 바인딩을 추가합니다.
+   - 변수 이름: `RANKINGS_KV`
+   - KV 네임스페이스: `league-rank-data`
+6. 바인딩 적용을 위해 Pages를 한 번 다시 배포합니다.
 
 사이트 주소는 `https://<프로젝트명>.pages.dev`입니다.
 
@@ -39,14 +41,14 @@
 
 **Variables**
 
-- `GITHUB_OWNER`: GitHub 사용자명 또는 조직명
-- `GITHUB_REPO`: 저장소 이름
+- `GITHUB_OWNER`: GitHub 사용자명 또는 조직명 (선택, 기본값 `chlye3232`)
+- `GITHUB_REPO`: 저장소 이름 (선택, 기본값 `league-rank`)
 - `GITHUB_BRANCH`: `main`
 - `GITHUB_WORKFLOW_FILE`: `refresh-and-deploy.yml`
 
 GitHub 토큰은 브라우저로 전달되지 않고 Pages Function에서만 사용됩니다. 직접 갱신 버튼은 별도의 비밀번호 입력 없이 실행되며, 한 브라우저·IP에서는 10분에 한 번만 요청할 수 있고 이미 실행 중인 갱신이 있으면 중복 요청이 거부됩니다.
 
-## 3. 갱신과 배포
+## 3. 갱신과 KV 저장
 
 `.github/workflows/refresh-and-deploy.yml`이 그룹별 주기에 따라 다음 작업을 수행합니다.
 
@@ -55,7 +57,9 @@ GitHub 토큰은 브라우저로 전달되지 않고 Pages Function에서만 사
 3. 실패한 리그만 구매 프록시로 즉시 재시도
 4. 그래도 실패하면 5분 기다린 후 해당 리그만 마지막 재시도
 5. `rank`, `id`만 포함한 공개 JSON 생성
-6. `public/`만 Cloudflare Pages에 배포
+6. 공개 JSON을 Cloudflare KV의 `rankings` 키에 저장
+
+Pages는 코드가 바뀔 때만 배포합니다. 예약 갱신과 직접 갱신은 Pages를 다시 배포하지 않고 KV 데이터만 교체합니다.
 
 자동 갱신 주기는 다음과 같습니다.
 
@@ -88,6 +92,6 @@ python -m http.server 8788 --directory public
 - `public/_headers`
 - `public/_routes.json`
 
-`public/data/rankings.json`에는 리그, 순위와 TikTok 아이디만 들어갑니다. 갱신 시각, 실패 기록과 실행 로그는 공개되지 않습니다.
+`public/data/rankings.json`에는 리그, 순위와 TikTok 아이디만 들어가며 KV가 비어 있거나 연결되지 않았을 때 사용하는 예비 데이터입니다. 정상 운영 중에는 웹이 `/api/rankings`를 통해 KV의 최신 데이터를 읽습니다. 갱신 시각, 실패 기록과 실행 로그는 공개되지 않습니다.
 
-`functions/api/refresh.js`는 웹 버튼의 서버 측 API이며 GitHub 토큰과 갱신키 자체를 응답이나 정적 파일에 포함하지 않습니다.
+`public/_worker.js`는 KV 조회와 직접 갱신 버튼의 서버 측 API입니다. GitHub 토큰은 응답이나 정적 파일에 포함되지 않습니다.

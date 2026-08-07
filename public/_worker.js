@@ -4,6 +4,7 @@ const JSON_HEADERS = {
 };
 const COOLDOWN_SECONDS = 10 * 60;
 const COOLDOWN_COOKIE = "league_refresh_cooldown";
+const RANKINGS_KEY = "rankings";
 
 function jsonResponse(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -67,6 +68,26 @@ async function githubRequest(url, token, init = {}) {
       "User-Agent": "league-rank-pages-worker",
       ...(init.headers || {}),
     },
+  });
+}
+
+async function handleRankings(request, env) {
+  if (request.method !== "GET") {
+    return jsonResponse({ detail: "GET 요청만 허용됩니다." }, 405);
+  }
+
+  if (!env.RANKINGS_KV) {
+    return jsonResponse({ detail: "랭킹 KV 연결이 설정되지 않았습니다." }, 503);
+  }
+
+  const rankings = await env.RANKINGS_KV.get(RANKINGS_KEY);
+  if (!rankings) {
+    return jsonResponse({ detail: "저장된 랭킹 데이터가 아직 없습니다." }, 404);
+  }
+
+  return new Response(rankings, {
+    status: 200,
+    headers: JSON_HEADERS,
   });
 }
 
@@ -143,6 +164,15 @@ async function handleRefresh(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/api/rankings" || url.pathname === "/api/rankings/") {
+      try {
+        return await handleRankings(request, env);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || "알 수 없는 오류");
+        return jsonResponse({ detail: `랭킹 데이터를 읽지 못했습니다: ${message}` }, 500);
+      }
+    }
+
     if (url.pathname === "/api/refresh" || url.pathname === "/api/refresh/") {
       try {
         return await handleRefresh(request, env);
