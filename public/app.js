@@ -90,9 +90,18 @@ async function requestManualRefresh() {
       },
       body: JSON.stringify({ group: "all" }),
     });
-    const result = await response.json().catch(() => ({}));
+    const responseText = await response.text();
+    let result = {};
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      result = {};
+    }
     if (!response.ok) {
-      throw new Error(result.detail || "직접 갱신을 요청하지 못했습니다.");
+      const fallback = responseText && responseText.length <= 180
+        ? responseText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+        : `직접 갱신 서버 HTTP ${response.status}`;
+      throw new Error(result.detail || fallback || "직접 갱신을 요청하지 못했습니다.");
     }
     showToast(result.detail || "직접 갱신을 요청했습니다.");
   } catch (error) {

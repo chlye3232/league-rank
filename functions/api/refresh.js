@@ -63,14 +63,14 @@ async function githubRequest(url, token, init = {}) {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2026-03-10",
+      "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "league-rank-pages-function",
       ...(init.headers || {}),
     },
   });
 }
 
-export async function onRequest({ request, env }) {
+async function handleRequest({ request, env }) {
   if (request.method !== "POST") {
     return jsonResponse({ detail: "POST 요청만 허용됩니다." }, 405);
   }
@@ -80,11 +80,10 @@ export async function onRequest({ request, env }) {
     return jsonResponse({ detail: "웹페이지의 직접 갱신 버튼을 이용해주세요." }, 403);
   }
 
-  const required = ["GITHUB_ACTIONS_TOKEN"];
-  const missing = required.filter((name) => !String(env[name] || "").trim());
-  if (missing.length) {
+  const githubToken = String(env.GITHUB_ACTIONS_TOKEN || "").trim();
+  if (!githubToken) {
     return jsonResponse(
-      { detail: `직접 갱신 서버 설정 누락: ${missing.join(", ")}` },
+      { detail: "직접 갱신 서버 설정 누락: GITHUB_ACTIONS_TOKEN" },
       503,
     );
   }
@@ -106,12 +105,12 @@ export async function onRequest({ request, env }) {
   const group = ["all", "A", "B", "C", "D"].includes(body.group) ? body.group : "all";
   const owner = String(env.GITHUB_OWNER || "chlye3232").trim();
   const repo = String(env.GITHUB_REPO || "league-rank").trim();
-  const workflow = env.GITHUB_WORKFLOW_FILE || "refresh-and-deploy.yml";
-  const branch = env.GITHUB_BRANCH || "main";
+  const workflow = String(env.GITHUB_WORKFLOW_FILE || "refresh-and-deploy.yml").trim();
+  const branch = String(env.GITHUB_BRANCH || "main").trim();
   const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(workflow)}`;
 
   for (const status of ["queued", "in_progress"]) {
-    const active = await githubRequest(`${base}/runs?status=${status}&per_page=1`, env.GITHUB_ACTIONS_TOKEN);
+    const active = await githubRequest(`${base}/runs?status=${status}&per_page=1`, githubToken);
     if (!active.ok) {
       return jsonResponse({ detail: "GitHub 실행 상태를 확인하지 못했습니다." }, 502);
     }
@@ -122,7 +121,7 @@ export async function onRequest({ request, env }) {
   }
 
   const cooldownKey = await setIpCooldown(request);
-  const dispatched = await githubRequest(`${base}/dispatches`, env.GITHUB_ACTIONS_TOKEN, {
+  const dispatched = await githubRequest(`${base}/dispatches`, githubToken, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ref: branch, inputs: { group } }),
@@ -138,4 +137,13 @@ export async function onRequest({ request, env }) {
       "Set-Cookie": `${COOLDOWN_COOKIE}=1; Max-Age=${COOLDOWN_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Strict`,
     },
   );
+}
+
+export async function onRequest(context) {
+  try {
+    return await handleRequest(context);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "알 수 없는 오류");
+    return jsonResponse({ detail: `직접 갱신 서버 오류: ${message}` }, 500);
+  }
 }
