@@ -74,6 +74,23 @@ h1 {
 
 .copy-all:hover:not(:disabled) { transform: translateY(-1px); background: #263248; }
 .copy-all:disabled { cursor: wait; opacity: 0.55; }
+
+.manual-refresh {
+  width: 100%;
+  margin-top: 10px;
+  padding: 13px 18px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.manual-refresh:hover:not(:disabled) { border-color: #adc4ed; background: #edf4ff; }
+.manual-refresh:disabled { cursor: wait; opacity: 0.55; }
+
 .league-section { margin-top: 44px; }
 .league-section h2 { margin: 0 0 18px; font-size: 22px; letter-spacing: -0.035em; }
 
@@ -103,7 +120,8 @@ h1 {
 .league-button:hover { transform: translateY(-2px); background: var(--blue-dark); box-shadow: 0 13px 26px rgba(47, 111, 236, 0.24); }
 .league-button:active { transform: translateY(0); }
 .league-button:focus-visible,
-.copy-all:focus-visible { outline: 3px solid #9dc0ff; outline-offset: 3px; }
+.copy-all:focus-visible,
+.manual-refresh:focus-visible { outline: 3px solid #9dc0ff; outline-offset: 3px; }
 
 .toast {
   position: fixed;

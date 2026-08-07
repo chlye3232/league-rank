@@ -570,8 +570,13 @@ class LeagueUpdater:
         direct: dict[int, Board] = {}
         harvested: dict[int, Board] = {}
         probe_notes: dict[str, list[str]] = {league: [] for league in selected}
+        direct_blocked = False
 
         for league in selected:
+            if direct_blocked:
+                probe_notes[league].append("직접 접속 차단으로 프록시 단계에 넘김")
+                continue
+
             expected = LEAGUE_CLASS_TYPES[league]
             if expected in harvested:
                 print(f"[{league}] 앞선 조회 결과를 재사용합니다")
@@ -592,8 +597,12 @@ class LeagueUpdater:
                     if board.class_type == expected:
                         direct[expected] = board
                         break
-                except TikTokBlockedError:
-                    raise
+                except TikTokBlockedError as error:
+                    message = f"@{candidate}: {error}"
+                    probe_notes[league].append(message)
+                    print(f"      직접 접속 차단 - 이 리그부터 프록시 단계에 넘깁니다: {error}")
+                    direct_blocked = True
+                    break
                 except LeagueUpdaterError as error:
                     message = f"@{candidate}: {error}"
                     probe_notes[league].append(message)
@@ -726,7 +735,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=LEAGUE_CODES,
         help="특정 리그만 검사합니다. 여러 번 지정할 수 있습니다",
     )
-    parser.add_argument("--max-tries", type=int, default=20, help="리그별 순서대로 검사할 최대 ID 수 (기본 20)")
+    parser.add_argument("--max-tries", type=int, default=50, help="리그별 순서대로 검사할 최대 ID 수 (기본 50)")
     parser.add_argument("--delay", type=float, default=0.35, help="랭킹 요청 사이 대기 초 (기본 0.35)")
     parser.add_argument("--timeout", type=float, default=20.0, help="HTTP 제한 시간 초 (기본 20)")
     parser.add_argument("--retries", type=int, default=2, help="일시적 오류 재시도 횟수 (기본 2)")
