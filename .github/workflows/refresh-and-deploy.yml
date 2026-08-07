@@ -1,0 +1,94 @@
+name: Refresh and deploy league rankings
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: league-ranking-deploy
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install collector dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Restore previous snapshot and ID cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            output/league-anchors.json
+            id_cache.json
+          key: league-state-${{ github.run_id }}
+          restore-keys: |
+            league-state-
+
+      - name: Initialize cached state
+        shell: bash
+        run: |
+          mkdir -p output
+          if [ ! -f output/league-anchors.json ]; then
+            cp seed/league-anchors.json output/league-anchors.json
+          fi
+          if [ ! -f id_cache.json ] && [ -f seed/id_cache.json ]; then
+            cp seed/id_cache.json id_cache.json
+          fi
+
+      - name: Prepare proxy rotation
+        shell: bash
+        env:
+          PROXY_1: ${{ secrets.PROXY_1 }}
+          PROXY_2: ${{ secrets.PROXY_2 }}
+          PROXY_3: ${{ secrets.PROXY_3 }}
+          PROXY_4: ${{ secrets.PROXY_4 }}
+          PROXY_5: ${{ secrets.PROXY_5 }}
+        run: |
+          proxies=""
+          for value in "$PROXY_1" "$PROXY_2" "$PROXY_3" "$PROXY_4" "$PROXY_5"; do
+            [ -z "$value" ] && continue
+            echo "::add-mask::$value"
+            if [ -z "$proxies" ]; then proxies="$value"; else proxies="$proxies,$value"; fi
+          done
+          echo "TIKTOK_PROXY_URLS=$proxies" >> "$GITHUB_ENV"
+
+      - name: Refresh TikTok league snapshot
+        shell: bash
+        env:
+          TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+        run: |
+          set +e
+          python league_rank_updater.py --max-tries 20 --delay 0.35
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+            exit "$status"
+          fi
+
+      - name: Build sanitized static site
+        run: python build_static_site.py
+
+      - name: Deploy public directory to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy public --project-name=${{ vars.CLOUDFLARE_PROJECT_NAME }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
