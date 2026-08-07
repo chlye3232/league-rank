@@ -2,20 +2,59 @@ const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 };
+const COOLDOWN_SECONDS = 10 * 60;
+const COOLDOWN_COOKIE = "league_refresh_cooldown";
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+function jsonResponse(body, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+  });
 }
 
-function constantTimeEqual(left, right) {
-  const a = new TextEncoder().encode(left || "");
-  const b = new TextEncoder().encode(right || "");
-  let difference = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    difference |= (a[index] || 0) ^ (b[index] || 0);
+function hasCooldownCookie(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  return cookie.split(";").some((part) => part.trim().startsWith(`${COOLDOWN_COOKIE}=`));
+}
+
+async function rateLimitCacheKey(request) {
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(clientIp));
+  const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request(`https://league-refresh-rate-limit.invalid/${hash}`, { method: "GET" });
+}
+
+async function isIpCoolingDown(request) {
+  try {
+    const key = await rateLimitCacheKey(request);
+    return Boolean(await caches.default.match(key));
+  } catch {
+    return false;
   }
-  return difference === 0;
+}
+
+async function setIpCooldown(request) {
+  try {
+    const key = await rateLimitCacheKey(request);
+    await caches.default.put(
+      key,
+      new Response("1", {
+        headers: { "Cache-Control": `public, max-age=${COOLDOWN_SECONDS}` },
+      }),
+    );
+    return key;
+  } catch {
+    return null;
+  }
+}
+
+async function clearIpCooldown(key) {
+  if (!key) return;
+  try {
+    await caches.default.delete(key);
+  } catch {
+    // The browser cookie still prevents accidental repeated clicks.
+  }
 }
 
 async function githubRequest(url, token, init = {}) {
@@ -36,12 +75,22 @@ export async function onRequest({ request, env }) {
     return jsonResponse({ detail: "POST 요청만 허용됩니다." }, 405);
   }
 
-  const required = ["REFRESH_KEY", "GITHUB_ACTIONS_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
+  const requestOrigin = request.headers.get("Origin");
+  if (requestOrigin !== new URL(request.url).origin) {
+    return jsonResponse({ detail: "웹페이지의 직접 갱신 버튼을 이용해주세요." }, 403);
+  }
+
+  const required = ["GITHUB_ACTIONS_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
   if (required.some((name) => !env[name])) {
     return jsonResponse({ detail: "직접 갱신 서버 설정이 완료되지 않았습니다." }, 503);
   }
-  if (!constantTimeEqual(request.headers.get("X-Refresh-Key"), env.REFRESH_KEY)) {
-    return jsonResponse({ detail: "갱신키가 올바르지 않습니다." }, 401);
+
+  if (hasCooldownCookie(request) || await isIpCoolingDown(request)) {
+    return jsonResponse(
+      { detail: "직접 갱신은 한 기기·IP에서 10분에 한 번만 요청할 수 있습니다." },
+      429,
+      { "Retry-After": String(COOLDOWN_SECONDS) },
+    );
   }
 
   let body = {};
@@ -66,13 +115,21 @@ export async function onRequest({ request, env }) {
     }
   }
 
+  const cooldownKey = await setIpCooldown(request);
   const dispatched = await githubRequest(`${base}/dispatches`, env.GITHUB_ACTIONS_TOKEN, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ref: branch, inputs: { group } }),
   });
   if (!dispatched.ok) {
+    await clearIpCooldown(cooldownKey);
     return jsonResponse({ detail: "GitHub 갱신 작업을 시작하지 못했습니다." }, 502);
   }
-  return jsonResponse({ detail: "직접 갱신을 요청했습니다." }, 202);
+  return jsonResponse(
+    { detail: "직접 갱신을 요청했습니다." },
+    202,
+    {
+      "Set-Cookie": `${COOLDOWN_COOKIE}=1; Max-Age=${COOLDOWN_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Strict`,
+    },
+  );
 }

@@ -78,12 +78,6 @@ async function loadRankings({ quiet = false } = {}) {
 }
 
 async function requestManualRefresh() {
-  let refreshKey = sessionStorage.getItem("leagueRefreshKey") || "";
-  if (!refreshKey) {
-    refreshKey = window.prompt("내부용 갱신키를 입력하세요.")?.trim() || "";
-  }
-  if (!refreshKey) return;
-
   manualRefreshButton.disabled = true;
   manualRefreshButton.textContent = "요청 중…";
   try {
@@ -93,16 +87,13 @@ async function requestManualRefresh() {
       credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
-        "X-Refresh-Key": refreshKey,
       },
       body: JSON.stringify({ group: "all" }),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 401) sessionStorage.removeItem("leagueRefreshKey");
       throw new Error(result.detail || "직접 갱신을 요청하지 못했습니다.");
     }
-    sessionStorage.setItem("leagueRefreshKey", refreshKey);
     showToast(result.detail || "직접 갱신을 요청했습니다.");
   } catch (error) {
     showToast(error.message);
