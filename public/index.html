@@ -20,9 +20,20 @@
           전체 리그 ID 복사
         </button>
 
-        <button id="manual-refresh" class="manual-refresh" type="button">
-          직접 갱신
-        </button>
+        <section class="refresh-section" aria-labelledby="refresh-heading">
+          <div class="refresh-heading-row">
+            <h2 id="refresh-heading">갱신할 리그 선택</h2>
+            <div class="refresh-actions">
+              <button id="refresh-select-all" type="button">전체 선택</button>
+              <button id="refresh-clear-all" type="button">전체 해제</button>
+            </div>
+          </div>
+          <div id="refresh-grid" class="refresh-grid"></div>
+          <p id="refresh-selection-count" class="refresh-selection-count">0개 선택</p>
+          <button id="manual-refresh" class="manual-refresh" type="button" disabled>
+            갱신할 리그를 선택하세요
+          </button>
+        </section>
 
         <section class="league-section" aria-labelledby="league-heading">
           <h2 id="league-heading">리그별 ID 복사</h2>

@@ -171,6 +171,13 @@ def prepare(group: str) -> int:
     return 0
 
 
+def prepare_leagues(value: str) -> int:
+    selected = parse_leagues(value)
+    write_github_outputs(leagues=",".join(selected), count=len(selected))
+    print(f"선택 리그: {', '.join(selected)}")
+    return 0
+
+
 def record_attempt(group: str, phase: str, league_value: str, exit_code: int, log_file: str) -> int:
     selected = parse_leagues(league_value)
     attempt_path = snapshot_path(selected)
@@ -223,7 +230,9 @@ def parse_args() -> argparse.Namespace:
     commands = parser.add_subparsers(dest="command", required=True)
 
     prepare_parser = commands.add_parser("prepare")
-    prepare_parser.add_argument("--group", required=True)
+    prepare_target = prepare_parser.add_mutually_exclusive_group(required=True)
+    prepare_target.add_argument("--group")
+    prepare_target.add_argument("--leagues")
 
     record = commands.add_parser("record-attempt")
     record.add_argument("--group", required=True)
@@ -237,6 +246,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.command == "prepare":
+        if args.leagues:
+            return prepare_leagues(args.leagues)
         return prepare(args.group)
     if args.command == "record-attempt":
         return record_attempt(args.group, args.phase, args.leagues, args.exit_code, args.log_file)

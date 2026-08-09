@@ -5,6 +5,12 @@ const JSON_HEADERS = {
 const COOLDOWN_SECONDS = 10 * 60;
 const COOLDOWN_COOKIE = "league_refresh_cooldown";
 const RANKINGS_KEY = "rankings";
+const LEAGUE_CODES = [
+  "A1", "A2", "A3",
+  "B1", "B2", "B3", "B4", "B5",
+  "C1", "C2", "C3", "C4", "C5",
+  "D1", "D2", "D3", "D4", "D5",
+];
 
 function jsonResponse(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -123,7 +129,16 @@ async function handleRefresh(request, env) {
   } catch {
     body = {};
   }
-  const group = ["all", "A", "B", "C", "D"].includes(body.group) ? body.group : "all";
+  const requestedLeagues = Array.isArray(body.leagues)
+    ? body.leagues.map((league) => String(league || "").trim().toUpperCase())
+    : [];
+  const requestedSet = new Set(requestedLeagues);
+  const leagues = LEAGUE_CODES.filter((league) => requestedSet.has(league));
+  const hasInvalidLeague = requestedLeagues.some((league) => !LEAGUE_CODES.includes(league));
+  if (!leagues.length || hasInvalidLeague) {
+    return jsonResponse({ detail: "갱신할 리그를 올바르게 선택해주세요." }, 400);
+  }
+
   const owner = String(env.GITHUB_OWNER || "chlye3232").trim();
   const repo = String(env.GITHUB_REPO || "league-rank").trim();
   const workflow = String(env.GITHUB_WORKFLOW_FILE || "refresh-and-deploy.yml").trim();
@@ -145,7 +160,10 @@ async function handleRefresh(request, env) {
   const dispatched = await githubRequest(`${base}/dispatches`, githubToken, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ref: branch, inputs: { group } }),
+    body: JSON.stringify({
+      ref: branch,
+      inputs: { group: "all", leagues: leagues.join(",") },
+    }),
   });
   if (!dispatched.ok) {
     await clearIpCooldown(cooldownKey);
@@ -153,7 +171,7 @@ async function handleRefresh(request, env) {
   }
 
   return jsonResponse(
-    { detail: "직접 갱신을 요청했습니다." },
+    { detail: `선택한 ${leagues.length}개 리그의 갱신을 요청했습니다.` },
     202,
     {
       "Set-Cookie": `${COOLDOWN_COOKIE}=1; Max-Age=${COOLDOWN_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Strict`,

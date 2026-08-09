@@ -1,7 +1,17 @@
 const grid = document.querySelector("#league-grid");
 const copyAllButton = document.querySelector("#copy-all");
 const manualRefreshButton = document.querySelector("#manual-refresh");
+const refreshGrid = document.querySelector("#refresh-grid");
+const refreshSelectAllButton = document.querySelector("#refresh-select-all");
+const refreshClearAllButton = document.querySelector("#refresh-clear-all");
+const refreshSelectionCount = document.querySelector("#refresh-selection-count");
 const toast = document.querySelector("#toast");
+const LEAGUE_CODES = [
+  "A1", "A2", "A3",
+  "B1", "B2", "B3", "B4", "B5",
+  "C1", "C2", "C3", "C4", "C5",
+  "D1", "D2", "D3", "D4", "D5",
+];
 
 let toastTimer = null;
 
@@ -10,6 +20,53 @@ function showToast(message) {
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2200);
+}
+
+function selectedRefreshLeagues() {
+  return Array.from(refreshGrid.querySelectorAll("input:checked"), (input) => input.value);
+}
+
+function updateRefreshControls() {
+  const count = selectedRefreshLeagues().length;
+  refreshSelectionCount.textContent = `${count}개 선택`;
+  manualRefreshButton.disabled = count === 0;
+  manualRefreshButton.textContent = count
+    ? `선택한 ${count}개 리그 갱신`
+    : "갱신할 리그를 선택하세요";
+}
+
+function setRefreshOptions(checked) {
+  refreshGrid.querySelectorAll("input").forEach((input) => {
+    input.checked = checked;
+  });
+  updateRefreshControls();
+}
+
+function setRefreshOptionsDisabled(disabled) {
+  refreshGrid.querySelectorAll("input").forEach((input) => {
+    input.disabled = disabled;
+  });
+  refreshSelectAllButton.disabled = disabled;
+  refreshClearAllButton.disabled = disabled;
+}
+
+function renderRefreshOptions() {
+  LEAGUE_CODES.forEach((code) => {
+    const label = document.createElement("label");
+    label.className = "refresh-option";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = code;
+    input.setAttribute("aria-label", `${code} 리그 갱신 선택`);
+    input.addEventListener("change", updateRefreshControls);
+
+    const text = document.createElement("span");
+    text.textContent = code;
+    label.append(input, text);
+    refreshGrid.append(label);
+  });
+  updateRefreshControls();
 }
 
 function uniqueIds(leagues) {
@@ -100,8 +157,15 @@ async function loadRankings({ quiet = false } = {}) {
 }
 
 async function requestManualRefresh() {
+  const leagues = selectedRefreshLeagues();
+  if (!leagues.length) {
+    showToast("갱신할 리그를 하나 이상 선택해주세요.");
+    return;
+  }
+
   manualRefreshButton.disabled = true;
   manualRefreshButton.textContent = "요청 중…";
+  setRefreshOptionsDisabled(true);
   try {
     const response = await fetch("/api/refresh", {
       method: "POST",
@@ -110,7 +174,7 @@ async function requestManualRefresh() {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ group: "all" }),
+      body: JSON.stringify({ leagues }),
     });
     const responseText = await response.text();
     let result = {};
@@ -129,10 +193,13 @@ async function requestManualRefresh() {
   } catch (error) {
     showToast(error.message);
   } finally {
-    manualRefreshButton.disabled = false;
-    manualRefreshButton.textContent = "직접 갱신";
+    setRefreshOptionsDisabled(false);
+    updateRefreshControls();
   }
 }
 
+refreshSelectAllButton.addEventListener("click", () => setRefreshOptions(true));
+refreshClearAllButton.addEventListener("click", () => setRefreshOptions(false));
 manualRefreshButton.addEventListener("click", requestManualRefresh);
+renderRefreshOptions();
 loadRankings();
