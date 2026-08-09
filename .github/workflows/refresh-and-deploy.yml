@@ -21,6 +21,11 @@ on:
           - B
           - C
           - D
+      leagues:
+        description: "Optional comma-separated leagues (example: A1,B3,D5)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -44,13 +49,18 @@ jobs:
         shell: bash
         run: |
           schedule="${{ github.event.schedule }}"
-          case "$schedule" in
-            "45 */2 * * *") value="A" ;;
-            "25 0,3,6,9,12,15,18,21 * * *"|"55 1,4,7,10,13,16,19,22 * * *") value="B" ;;
-            "15 * * * *") value="C" ;;
-            "5,35 * * * *") value="D" ;;
-            *) value="${{ inputs.group || 'all' }}" ;;
-          esac
+          requested_leagues="${{ inputs.leagues || '' }}"
+          if [ -n "$requested_leagues" ]; then
+            value="custom"
+          else
+            case "$schedule" in
+              "45 */2 * * *") value="A" ;;
+              "25 0,3,6,9,12,15,18,21 * * *"|"55 1,4,7,10,13,16,19,22 * * *") value="B" ;;
+              "15 * * * *") value="C" ;;
+              "5,35 * * * *") value="D" ;;
+              *) value="${{ inputs.group || 'all' }}" ;;
+            esac
+          fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
           echo "선택 그룹: $value"
 
@@ -88,7 +98,15 @@ jobs:
 
       - name: Prepare league target
         id: target
-        run: python refresh_state.py prepare --group "${{ steps.group.outputs.value }}"
+        shell: bash
+        env:
+          REQUESTED_LEAGUES: ${{ inputs.leagues || '' }}
+        run: |
+          if [ -n "$REQUESTED_LEAGUES" ]; then
+            python refresh_state.py prepare --leagues "$REQUESTED_LEAGUES"
+          else
+            python refresh_state.py prepare --group "${{ steps.group.outputs.value }}"
+          fi
 
       - name: Prepare optional purchased proxies
         id: proxies
