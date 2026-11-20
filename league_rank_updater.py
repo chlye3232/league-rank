@@ -557,10 +557,18 @@ class TikTokClient:
             headers=PROFILE_HEADERS,
             sign=False,
         )
+        if response.status_code in (403, 429) or (
+            response.status_code == 200 and "SlardarWAF" in response.text
+        ):
+            raise TikTokBlockedError(
+                f"@{value} 프로필 조회 차단 (HTTP {response.status_code} / WAF)"
+            )
         if response.status_code != 200:
             raise TikTokRequestError(f"@{value} 프로필 HTTP {response.status_code}")
         user_id = parse_profile_html(response.text, value)
         if not user_id:
+            if live_response.status_code in (403, 429):
+                raise TikTokBlockedError(f"@{value} 프로필 조회 차단 (HTTP {live_response.status_code})")
             raise TikTokRequestError(f"@{value}의 숫자 user_id를 찾지 못했습니다")
         self.id_cache[key] = user_id
         self.save_cache()
@@ -605,8 +613,6 @@ class TikTokClient:
 
         headers = {
             "Accept-Encoding": "gzip",
-            "Connection": "keep-alive",
-            "Host": HOST,
             "User-Agent": build_user_agent(persona, env_overrides),
             "passport-sdk-version": "1",
             "sdk-version": "2",
