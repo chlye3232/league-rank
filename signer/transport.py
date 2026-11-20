@@ -89,6 +89,17 @@ class HttpResponse:
         return json.loads(raw.decode("utf-8"))
 
 
+_HEADER_FORBIDDEN_H2 = frozenset({
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "transfer-encoding",
+    "upgrade",
+    "te",
+    "host",
+})
+
+
 def _header_text(value: Any) -> str:
     if isinstance(value, memoryview):
         return bytes(value).decode("latin1")
@@ -208,8 +219,11 @@ class SignedSession(MetaSecSigner):
 
         effective_timeout = max(1.0, float(self.timeout if timeout is None else timeout))
         if self._use_wreq:
+            h2_headers = {
+                k: v for k, v in request_headers.items() if k.lower() not in _HEADER_FORBIDDEN_H2
+            }
             options: dict[str, Any] = {
-                "headers": request_headers,
+                "headers": h2_headers,
                 "timeout": datetime.timedelta(seconds=effective_timeout),
             }
             if body:
