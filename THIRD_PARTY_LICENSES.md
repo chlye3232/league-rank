@@ -1,3 +1,3 @@
 # Third-party code
 
-The vendored `signer/` package is derived from `tr4cex/TikTok-Encryption` and is distributed under its MIT License. The original license text is included at `signer/LICENSE`.
+The `signer/` package is adapted from the local `reversetok` (`47.7.2` MetaSec SDK `v05.03.04`) pure-Python signing, TTEncrypt, TicketGuard, and `wreq` session modules.

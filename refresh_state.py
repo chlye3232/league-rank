@@ -181,9 +181,10 @@ def prepare_leagues(value: str) -> int:
 def record_attempt(group: str, phase: str, league_value: str, exit_code: int, log_file: str) -> int:
     selected = parse_leagues(league_value)
     attempt_path = snapshot_path(selected)
-    attempt = read_json(attempt_path, {}) if exit_code in (0, 2) else {}
+    attempt = read_json(attempt_path, {}) if exit_code in (0, 2, 3) else {}
     successful = snapshot_successes(attempt, selected)
     failed = [league for league in selected if league not in successful]
+    auth_failed = exit_code == 3
 
     if successful and attempt_path != LATEST_SNAPSHOT:
         latest = read_json(LATEST_SNAPSHOT, {})
@@ -202,6 +203,7 @@ def record_attempt(group: str, phase: str, league_value: str, exit_code: int, lo
         "phase": phase,
         "recordedAt": recorded_at,
         "exitCode": exit_code,
+        "authFailed": auth_failed,
         "attemptedLeagues": selected,
         "successfulLeagues": successful,
         "failedLeagues": failed,
@@ -220,7 +222,8 @@ def record_attempt(group: str, phase: str, league_value: str, exit_code: int, lo
         successful=",".join(successful),
         failed=",".join(failed),
         failed_count=len(failed),
-        fatal=exit_code not in (0, 2),
+        auth_failed=auth_failed,
+        fatal=exit_code not in (0, 2, 3),
     )
     return 0
 

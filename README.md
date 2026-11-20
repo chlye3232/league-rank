@@ -10,7 +10,9 @@
 
 다음 **Repository secrets**를 추가합니다.
 
-- `TIKTOK_TT_TOKEN`
+- `TIKTOK_TT_TOKEN` (만료 시 새 토큰으로 교체, 또는 아래 `TIKTOK_SESSION_JSON` 사용)
+- `TIKTOK_SESSION_JSON` (선택: `tiktok_auth.py --print-secret`으로 뽑은 세션 JSON)
+- `TIKTOK_PERSONA_JSON` (선택: 실기기 `X-Argus`에서 추출한 기기 페르소나 JSON)
 - `PROXY_1` ~ `PROXY_5` 중 사용하는 만큼
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
@@ -50,18 +52,26 @@ GitHub 토큰은 브라우저로 전달되지 않고 Pages Function에서만 사
 
 ## 3. 갱신과 KV 저장
 
-`.github/workflows/refresh-and-deploy.yml`이 매일 한국시간 00시와 12시에 전체 리그를 갱신하며 다음 작업을 수행합니다.
+`.github/workflows/refresh-and-deploy.yml`이 그룹별 주기에 따라 다음 작업을 수행합니다.
 
-1. 저장된 스냅샷과 ID 캐시 복원
-2. 프록시 없이 해당 그룹을 먼저 갱신
-3. 실패한 리그만 구매 프록시로 즉시 재시도
-4. 그래도 실패하면 5분 기다린 후 해당 리그만 마지막 재시도
-5. `rank`, `id`만 포함한 공개 JSON 생성
-6. 공개 JSON을 Cloudflare KV의 `rankings` 키에 저장
+1. 저장된 스냅샷, 세션 캐시(`output/tiktok-session.json`) 및 ID 캐시 복원
+2. 필요 시 `token_beat`로 세션 유지 및 응답 `x-tt-token`/쿠키/TicketGuard 자동 저장
+3. 프록시 없이 해당 그룹을 먼저 갱신
+4. 인증 만료(`먼저 로그인하세요`) 시 불필요한 재시도를 중단하고 실패 기록, 일시 차단 시 실패한 리그만 구매 프록시로 즉시 재시도
+5. 그래도 실패하면 5분 기다린 후 해당 리그만 마지막 재시도
+6. `rank`, `id`만 포함한 공개 JSON 생성
+7. 공개 JSON을 Cloudflare KV의 `rankings` 키에 저장
 
 Pages는 코드가 바뀔 때만 배포합니다. 예약 갱신과 직접 갱신은 Pages를 다시 배포하지 않고 KV 데이터만 교체합니다.
 
-자동 갱신은 모든 그룹을 대상으로 매일 한국시간 00시와 12시에 실행됩니다. 그 외 갱신은 웹의 직접 갱신 버튼이나 GitHub Actions의 `Run workflow` 버튼으로만 실행합니다. 한 그룹 안에서도 후보 ID를 동시에 요청하지 않고 최대 50명까지 순서대로 검사합니다.
+자동 갱신 주기는 다음과 같습니다.
+
+- A1~A3: 2시간
+- B1~B5: 1시간 30분
+- C1~C5: 1시간
+- D1~D5: 30분
+
+각 그룹은 서로 다른 분에 시작하도록 분산되어 있습니다. 한 그룹 안에서도 후보 ID를 동시에 요청하지 않고 최대 50명까지 순서대로 검사합니다.
 
 갱신 이력, 실패 목록과 실행 로그는 GitHub Actions의 실행 요약 및 비공개 아티팩트에 90일간 보관됩니다. 마지막 재시도 후에도 실패하면 기존 저장 데이터를 유지하고 해당 그룹의 다음 정기 갱신에서 다시 시도합니다. 이 기록들은 `public/`에 포함되지 않습니다.
 

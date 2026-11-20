@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Manual TikTok league ranking extractor.
-
-The input files in ``leaguerankid`` may contain either TikTok handles
-(``unique_id``) or numeric TikTok user IDs. Handles are resolved from the
-public profile page and cached locally. A numeric user ID is then used as the
-``anchor_id`` for TikTok's signed webcast rank-list request.
-"""
+"""Web collector variant with proxy handoff and auth-expiry short-circuiting."""
 
 from __future__ import annotations
 
@@ -19,14 +13,34 @@ import sys
 import time
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
-from zoneinfo import ZoneInfo
+from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore[assignment]
 
-from signer import argus, gorgon, ladon
+from signer import (
+    SignedSession,
+    SignupClient,
+    SignupError,
+    TikTokSessionState,
+    TransportError,
+    build_common_params,
+    build_user_agent,
+    default_kr_env_overrides,
+    extract_persona_from_argus,
+)
+
+_REQUEST_ERRORS: tuple[type[Exception], ...] = (
+    (TransportError, requests.RequestException) if requests is not None else (TransportError,)
+)
+_JSON_ERRORS: tuple[type[Exception], ...] = (
+    (ValueError, requests.JSONDecodeError) if requests is not None else (ValueError,)
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -35,8 +49,14 @@ DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
 DEFAULT_CACHE_PATH = SCRIPT_DIR / "id_cache.json"
 
 HOST = "webcast22-normal-c-alisg.tiktokv.com"
+PASSPORT_BASE_URL = "https://api16-normal-c-alisg.tiktokv.com"
 RANK_TYPE = 16
 FIXED_ROOM_ID = "7642978304493898516"
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_PARTIAL = 2
+EXIT_AUTH = 3
 
 LEAGUE_CLASS_TYPES: dict[str, int] = {
     "A1": 2000,
@@ -60,85 +80,6 @@ LEAGUE_CLASS_TYPES: dict[str, int] = {
 }
 CLASS_TYPE_LEAGUES = {value: key for key, value in LEAGUE_CLASS_TYPES.items()}
 LEAGUE_CODES = list(LEAGUE_CLASS_TYPES)
-
-DEFAULT_PARAMS = {
-    "anchor_id": "7378264028956705793",
-    "room_id": FIXED_ROOM_ID,
-    "rank_type": str(RANK_TYPE),
-    "region_type": "1",
-    "gap_interval": "0",
-    "use_simple_user": "true",
-    "league_phase": "0",
-    "device_platform": "android",
-    "os": "android",
-    "ssmix": "a",
-    "channel": "googleplay",
-    "aid": "1233",
-    "app_name": "musical_ly",
-    "version_code": "450203",
-    "version_name": "45.2.3",
-    "manifest_version_code": "2024502030",
-    "update_version_code": "2024502030",
-    "ab_version": "45.2.3",
-    "resolution": "900*1600",
-    "dpi": "320",
-    "device_type": "PHY110",
-    "device_brand": "OPPO",
-    "language": "ko",
-    "os_api": "28",
-    "os_version": "9",
-    "ac": "wifi",
-    "is_pad": "0",
-    "app_type": "normal",
-    "sys_region": "KR",
-    "last_install_time": "1779433522",
-    "mcc_mnc": "45002",
-    "timezone_name": "Asia/Seoul",
-    "carrier_region_v2": "450",
-    "app_language": "ko",
-    "carrier_region": "KR",
-    "timezone_offset": "32400",
-    "host_abi": "arm64-v8a",
-    "locale": "ko-KR",
-    "ac2": "wifi",
-    "uoo": "1",
-    "op_region": "KR",
-    "build_number": "45.2.3",
-    "region": "KR",
-    "iid": "7642608726025438992",
-    "device_id": "7642361429727249936",
-    "webcast_sdk_version": "4430",
-    "webcast_language": "ko-KR",
-    "webcast_locale": "ko_KR",
-    "effect_sdk_version": "21.4.0",
-    "current_network_quality_info": "{}",
-}
-
-RANK_HEADERS = {
-    "Accept-Encoding": "gzip",
-    "Connection": "keep-alive",
-    "Host": HOST,
-    "User-Agent": (
-        "com.zhiliaoapp.musically/2024502030 "
-        "(Linux; U; Android 9; ko_KR; PHY110; Build/PQ3B.190801.03250903;tt-ok/3.12.13.21)"
-    ),
-    "oec-cs-sdk-version": "v10.02.06-ov-android_V31",
-    "oec-cs-si-a": "2",
-    "oec-vc-sdk-version": "3.2.2.i18n",
-    "passport-sdk-version": "1",
-    "rpc-persist-pns-region-1": "KR|1835841",
-    "rpc-persist-pns-region-2": "KR|1835841",
-    "rpc-persist-pns-region-3": "KR|1835841|1841610",
-    "rpc-persist-pyxis-policy-v-tnc": "1",
-    "sdk-version": "2",
-    "x-bd-client-key": "#rp2Zt5ZoXdNmVkV/uwVFt6AtT1y4s7EC+G48E8bK4e47HTDIt9ny5IhwZd4+4UAZq08c8lWf6Jq44PaD",
-    "x-bd-kmsv": "0",
-    "x-tt-pba-encode": "4000",
-    "x-tt-request-tag": "n=0;nr=0;bg=0",
-    "x-tt-store-region": "kr",
-    "x-tt-store-region-src": "uid",
-    "x-vc-bdturing-sdk-version": "2.4.2.i18n",
-}
 
 PROFILE_HEADERS = {
     "User-Agent": (
@@ -168,6 +109,10 @@ class TikTokRequestError(LeagueUpdaterError):
 
 class TikTokBlockedError(TikTokRequestError):
     pass
+
+
+class TikTokAuthError(TikTokRequestError):
+    """Raised when TikTok rejects the login session (e.g. status_code 20003 / HTTP 401)."""
 
 
 @dataclass
@@ -317,9 +262,77 @@ def parse_profile_html(html: str, target_handle: str) -> str | None:
     return None
 
 
+def parse_live_room_user(payload: Any, target_handle: str) -> tuple[str | None, str | None]:
+    """Extract numeric user ID and room ID from TikTok's api-live/user/room JSON."""
+    if not isinstance(payload, dict):
+        return None, None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None, None
+    user = data.get("user")
+    if not isinstance(user, dict):
+        return None, None
+    unique_id = user.get("uniqueId") or user.get("unique_id")
+    if isinstance(unique_id, str) and unique_id and unique_id.casefold() != target_handle.casefold():
+        return None, None
+    user_id = user.get("id") or user.get("id_str")
+    if not str(user_id or "").isdigit():
+        return None, None
+    room_id = user.get("roomId") or user.get("room_id")
+    resolved_room = str(room_id) if str(room_id or "").isdigit() and str(room_id) != "0" else None
+    return str(user_id), resolved_room
+
+
 def parse_proxy_urls(value: str) -> list[str]:
     """Parse comma/newline separated HTTP(S) proxy URLs."""
     return ordered_unique(re.split(r"[,\r\n]+", value))
+
+
+def load_persona_overrides_from_env() -> dict[str, Any]:
+    """Build optional persona overrides from env vars (JSON, captured X-Argus, device/install IDs)."""
+    overrides: dict[str, Any] = {}
+    captured_argus = os.environ.get("TIKTOK_CAPTURED_ARGUS", "").strip()
+    if captured_argus:
+        captured_url = os.environ.get("TIKTOK_CAPTURED_URL", "").strip() or None
+        try:
+            overrides.update(extract_persona_from_argus(captured_argus, captured_url))
+        except Exception as error:
+            raise ConfigurationError(f"TIKTOK_CAPTURED_ARGUS 파싱 실패: {error}") from error
+
+    raw_persona = os.environ.get("TIKTOK_PERSONA_JSON", "").strip()
+    if raw_persona:
+        try:
+            parsed = json.loads(raw_persona)
+        except json.JSONDecodeError as error:
+            raise ConfigurationError("TIKTOK_PERSONA_JSON 값이 올바른 JSON이 아닙니다") from error
+        if not isinstance(parsed, dict):
+            raise ConfigurationError("TIKTOK_PERSONA_JSON 값은 JSON 객체여야 합니다")
+        overrides.update(parsed)
+
+    device_id = os.environ.get("TIKTOK_DEVICE_ID", "").strip()
+    install_id = os.environ.get("TIKTOK_INSTALL_ID", "").strip()
+    if device_id:
+        overrides["deviceId"] = device_id
+    if install_id:
+        overrides["installId"] = install_id
+    return overrides
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
 
 
 class TikTokClient:
@@ -330,64 +343,184 @@ class TikTokClient:
         timeout: float = 20.0,
         retries: int = 2,
         proxy_urls: Iterable[str] = (),
+        *,
+        session_path: Path | None = None,
+        session_state: TikTokSessionState | None = None,
+        persona_overrides: Mapping[str, Any] | None = None,
+        beat_interval_minutes: float = 60.0,
+        enable_token_beat: bool = True,
+        force_requests: bool = False,
     ):
-        self.token = token.strip()
         self.cache_path = cache_path
         self.timeout = timeout
         self.retries = max(0, retries)
         self.proxy_urls = [url.strip() for url in proxy_urls if url.strip()]
         self.proxy_cursor = 0
+        self.session_path = session_path
+        self.beat_interval_minutes = beat_interval_minutes
+        self.enable_token_beat = enable_token_beat
+        self._beat_checked = False
+
+        if session_state is not None:
+            self.session_state = session_state
+            if token.strip() and not self.session_state.session_token:
+                self.session_state.session_token = token.strip()
+        else:
+            self.session_state = TikTokSessionState.load(
+                session_path,
+                env_session_json=os.environ.get("TIKTOK_SESSION_JSON", ""),
+                env_token=token,
+                persona_overrides=persona_overrides,
+            )
+
+        self.token = self.session_state.session_token
         raw_cache = read_json(cache_path, {})
         self.id_cache: dict[str, str] = {
             str(key).casefold(): str(value)
             for key, value in raw_cache.items()
             if str(value).isdigit()
         } if isinstance(raw_cache, dict) else {}
-        self.profile_session = requests.Session()
-        self.profile_session.headers.update(PROFILE_HEADERS)
-        self.rank_session = requests.Session()
+        self.room_cache: dict[str, str] = {}
 
-    def _next_proxies(self) -> dict[str, str] | None:
+        self.signed_session = SignedSession(
+            self.session_state.persona,
+            timeout=timeout,
+            force_requests=force_requests,
+        )
+        if self.session_state.cookies:
+            try:
+                self.signed_session.restore_cookies(self.session_state.cookies)
+            except Exception:
+                pass
+        self.profile_session = self.signed_session
+        self.rank_session = self.signed_session
+
+    def close(self) -> None:
+        self.signed_session.close()
+
+    def __enter__(self) -> TikTokClient:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    @property
+    def active_token(self) -> str:
+        return self.session_state.session_token or self.token
+
+    def _next_proxy_url(self) -> str | None:
         if not self.proxy_urls:
             return None
         proxy_url = self.proxy_urls[self.proxy_cursor % len(self.proxy_urls)]
         self.proxy_cursor += 1
+        return proxy_url
+
+    def _next_proxies(self) -> dict[str, str] | None:
+        proxy_url = self._next_proxy_url()
+        if not proxy_url:
+            return None
         return {"http": proxy_url, "https": proxy_url}
 
     def save_cache(self) -> None:
         write_json_atomic(self.cache_path, dict(sorted(self.id_cache.items())))
 
+    def persist_session(self, *, force: bool = False) -> None:
+        if self.session_path is None:
+            return
+        try:
+            self.session_state.cookies = self.signed_session.dump_cookies(strict=False)
+        except Exception:
+            pass
+        if force or self.session_state.session_token or self.session_state.cookies:
+            self.session_state.save(self.session_path)
+
     def _get_with_retries(
         self,
-        session: requests.Session,
+        session: Any,
         url: str,
         *,
         headers: dict[str, str] | None = None,
-    ) -> requests.Response:
+        sign: bool = False,
+    ) -> Any:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
-                response = session.get(
-                    url,
-                    headers=headers,
-                    timeout=self.timeout,
-                    proxies=self._next_proxies(),
-                )
+                if isinstance(session, SignedSession):
+                    response = session.get(
+                        url,
+                        headers=headers,
+                        proxy_url=self._next_proxy_url(),
+                        sign=sign,
+                    )
+                else:
+                    response = session.get(
+                        url,
+                        headers=headers,
+                        timeout=self.timeout,
+                        proxies=self._next_proxies(),
+                    )
                 retryable = (
                     response.status_code == 429
                     or response.status_code >= 500
                     or (response.status_code == 403 and bool(self.proxy_urls))
                 )
-                if retryable:
-                    if attempt < self.retries:
-                        time.sleep(1.0 * (attempt + 1))
-                        continue
+                if retryable and attempt < self.retries:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
                 return response
-            except requests.RequestException as error:
+            except _REQUEST_ERRORS as error:
                 last_error = error
                 if attempt < self.retries:
                     time.sleep(1.0 * (attempt + 1))
         raise TikTokRequestError(f"TikTok 연결 실패: {last_error}")
+
+    def _should_beat(self, *, force: bool = False) -> bool:
+        if force:
+            return True
+        if not self.enable_token_beat or self._beat_checked or not self.active_token:
+            return False
+        if not self.session_state.last_beat_at:
+            return True
+        try:
+            last = datetime.fromisoformat(self.session_state.last_beat_at)
+            age_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
+            return age_minutes >= max(0.0, self.beat_interval_minutes)
+        except ValueError:
+            return True
+
+    def ensure_session_alive(self, *, force_beat: bool = False) -> None:
+        if not self._should_beat(force=force_beat):
+            return
+        self._beat_checked = True
+        env_overrides = default_kr_env_overrides()
+        persona = self.session_state.persona
+        common_params = build_common_params(persona, env_overrides)
+        common_headers = {"user-agent": build_user_agent(persona, env_overrides)}
+        signup_state = {
+            "status": "completed",
+            "nextAction": "completed",
+            "sessionToken": self.active_token,
+            **self.session_state.ticket_guard.to_dict(),
+        }
+        signup = SignupClient(
+            self.signed_session,
+            base_url=PASSPORT_BASE_URL,
+            state=signup_state,
+            common_headers=common_headers,
+            query_params=common_params,
+            proxy_url=self._next_proxy_url(),
+        )
+        try:
+            signup.token_beat(scene="boot", first_beat=not bool(self.session_state.last_beat_at))
+            self.session_state.session_token = str(signup.state.get("sessionToken") or self.active_token)
+            self.session_state.ticket_guard.ticket = str(signup.state.get("ticketGuardTicket") or self.session_state.ticket_guard.ticket)
+            self.session_state.ticket_guard.ts_sign = str(signup.state.get("ticketGuardTsSign") or self.session_state.ticket_guard.ts_sign)
+            self.session_state.last_beat_at = datetime.now(timezone.utc).isoformat()
+            self.token = self.session_state.session_token
+            self.persist_session(force=True)
+            print("세션 유지(token_beat) 완료", flush=True)
+        except (SignupError, TransportError) as error:
+            print(f"세션 유지(token_beat) 건너뜀: {error}", flush=True)
 
     def resolve_user_id(self, handle_or_id: str) -> str:
         value = normalize_handle(handle_or_id)
@@ -399,7 +532,31 @@ class TikTokClient:
             return cached
 
         encoded = urllib.parse.quote(value, safe="._-")
-        response = self._get_with_retries(self.profile_session, f"https://www.tiktok.com/@{encoded}")
+        live_url = f"https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId={encoded}&sourceType=54"
+        live_response = self._get_with_retries(
+            self.profile_session,
+            live_url,
+            headers=PROFILE_HEADERS,
+            sign=False,
+        )
+        if live_response.status_code == 200:
+            try:
+                user_id, room_id = parse_live_room_user(live_response.json(), value)
+                if user_id:
+                    if room_id:
+                        self.room_cache[user_id] = room_id
+                    self.id_cache[key] = user_id
+                    self.save_cache()
+                    return user_id
+            except Exception:
+                pass
+
+        response = self._get_with_retries(
+            self.profile_session,
+            f"https://www.tiktok.com/@{encoded}",
+            headers=PROFILE_HEADERS,
+            sign=False,
+        )
         if response.status_code != 200:
             raise TikTokRequestError(f"@{value} 프로필 HTTP {response.status_code}")
         user_id = parse_profile_html(response.text, value)
@@ -409,68 +566,77 @@ class TikTokClient:
         self.save_cache()
         return user_id
 
-    def fetch_ranking(self, anchor_id: str) -> dict[str, Any]:
-        if not self.token:
-            raise ConfigurationError(".env의 TIKTOK_TT_TOKEN 값을 입력해야 합니다")
+    def fetch_ranking(self, anchor_id: str, room_id: str | None = None) -> dict[str, Any]:
+        token = self.active_token
+        if not token:
+            raise ConfigurationError(".env의 TIKTOK_TT_TOKEN 또는 세션 파일을 설정해야 합니다")
 
-        now_seconds = time.time()
-        unix_ts = int(now_seconds)
-        rticket_ms = int(now_seconds * 1000)
-        params = DEFAULT_PARAMS.copy()
-        params.update(
-            {
-                "anchor_id": str(anchor_id),
-                "room_id": FIXED_ROOM_ID,
-                "rank_type": str(RANK_TYPE),
-                "ts": str(unix_ts),
-                "_rticket": str(rticket_ms),
-            }
-        )
-        query_string = urllib.parse.urlencode(params)
+        now_ns = time.time_ns()
+        unix_ts = now_ns // 1_000_000_000
+        rticket_ms = now_ns // 1_000_000
+        persona = self.session_state.persona
+        env_overrides = default_kr_env_overrides()
+        common_params = build_common_params(persona, env_overrides, now_ms=rticket_ms)
+        resolved_room = room_id or self.room_cache.get(str(anchor_id)) or FIXED_ROOM_ID
+
+        endpoint_params = {
+            "anchor_id": str(anchor_id),
+            "room_id": str(resolved_room),
+            "rank_type": str(RANK_TYPE),
+            "region_type": "1",
+            "gap_interval": "0",
+            "use_simple_user": "true",
+            "league_phase": "0",
+            "webcast_sdk_version": "4430",
+            "webcast_language": "ko-KR",
+            "webcast_locale": "ko_KR",
+            "effect_sdk_version": "21.4.0",
+            "current_network_quality_info": "{}",
+            **common_params,
+            "ac": "wifi",
+            "ac2": "wifi",
+            "uoo": "1",
+        }
+        query_string = urllib.parse.urlencode(endpoint_params)
         url = f"https://{HOST}/webcast/ranklist/list/v2/?{query_string}"
-        aid = int(params["aid"])
-        trace = f"{round(now_seconds * 1000) & 0xFFFFFFFF:x}10" + "".join(
+        trace = f"{rticket_ms & 0xFFFFFFFF:x}10" + "".join(
             random.choice("0123456789abcdef") for _ in range(16)
         )
 
-        headers = RANK_HEADERS.copy()
-        headers.update(
-            {
-                "X-Argus": argus.Argus.get_sign(
-                    queryhash=query_string,
-                    data=None,
-                    timestamp=unix_ts,
-                    aid=aid,
-                    license_id=1611921764,
-                    platform=0,
-                    sec_device_id="",
-                    sdk_version="v04.04.05-ov-android",
-                    sdk_version_int=134744640,
-                ),
-                "X-Ladon": ladon.Ladon.encrypt(unix_ts, 1611921764, aid),
-                "X-Gorgon": gorgon.get_xgorgon(
-                    params=query_string,
-                    ticket=now_seconds,
-                    data="",
-                    cookie="",
-                ),
-                "X-Khronos": str(unix_ts),
-                "X-SS-REQ-TICKET": str(rticket_ms),
-                "x-tt-trace-id": f"00-{trace}-{trace[:16]}-01",
-                "X-Tt-Token": self.token,
-            }
-        )
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Connection": "keep-alive",
+            "Host": HOST,
+            "User-Agent": build_user_agent(persona, env_overrides),
+            "passport-sdk-version": "1",
+            "sdk-version": "2",
+            "x-tt-bypass-dp": "1",
+            "x-tt-request-tag": "n=0;nr=0;bg=0",
+            "x-tt-store-region": "kr",
+            "x-tt-store-region-src": "uid",
+            "x-tt-trace-id": f"00-{trace}-{trace[:16]}-01",
+            "x-tt-token": token,
+            **self.session_state.ticket_guard.build_headers(url, has_token=True, timestamp=unix_ts),
+        }
 
-        response = self._get_with_retries(self.rank_session, url, headers=headers)
-        if response.status_code in (401, 403):
+        response = self._get_with_retries(self.rank_session, url, headers=headers, sign=True)
+        if self.session_state.apply_response(response.headers):
+            self.token = self.session_state.session_token
+            self.persist_session(force=True)
+        else:
+            self.persist_session(force=False)
+
+        if response.status_code == 401:
+            raise TikTokAuthError("랭킹 API HTTP 401: TikTok 로그인 세션 만료 또는 미인증")
+        if response.status_code == 403:
             raise TikTokBlockedError(
-                f"랭킹 API HTTP {response.status_code}: TIKTOK_TT_TOKEN 만료 또는 요청 차단 가능성"
+                "랭킹 API HTTP 403: 요청 차단 또는 TIKTOK_TT_TOKEN/프록시 확인 필요"
             )
         if response.status_code != 200:
             raise TikTokRequestError(f"랭킹 API HTTP {response.status_code}")
         try:
             payload = response.json()
-        except requests.JSONDecodeError as error:
+        except _JSON_ERRORS as error:
             raise TikTokRequestError("랭킹 API가 JSON이 아닌 응답을 반환했습니다") from error
         if not isinstance(payload, dict):
             raise TikTokRequestError("랭킹 API 응답 형식이 올바르지 않습니다")
@@ -478,11 +644,23 @@ class TikTokClient:
 
 
 def parse_board(payload: dict[str, Any], anchor: str, user_id: str) -> Board:
+    status_code = payload.get("status_code")
     data = payload.get("data")
     if not isinstance(data, dict):
+        if status_code == 20003:
+            raise TikTokAuthError("TikTok 로그인 세션 만료/미인증 (status_code=20003)")
         raise TikTokRequestError("랭킹 응답에 data가 없습니다")
-    if data.get("prompts"):
-        raise TikTokRequestError(f"TikTok 안내 응답: {data.get('prompts')}")
+
+    message = str(data.get("message") or "")
+    prompts = data.get("prompts")
+    if status_code == 20003 or "doesn't login" in message.lower() or "not login" in message.lower():
+        detail = prompts or message or "먼저 로그인하세요"
+        raise TikTokAuthError(
+            f"TikTok 로그인 세션 만료/미인증 (status_code={status_code}): {detail}"
+        )
+    if prompts:
+        raise TikTokRequestError(f"TikTok 안내 응답: {prompts}")
+
     rank_view = data.get("rank_view")
     if not isinstance(rank_view, dict):
         raise TikTokRequestError("랭킹 응답에 rank_view가 없습니다")
@@ -538,7 +716,11 @@ def map_board_rows(board: Board, league_date: str, created_at: str) -> list[dict
 
 
 def kst_today() -> str:
-    return datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+    try:
+        tz: Any = ZoneInfo("Asia/Seoul")
+    except ZoneInfoNotFoundError:
+        tz = timezone(timedelta(hours=9))
+    return datetime.now(tz).date().isoformat()
 
 
 class LeagueUpdater:
@@ -551,6 +733,8 @@ class LeagueUpdater:
         request_delay: float,
         keep_stale: bool,
         export_details: bool,
+        *,
+        force_beat: bool = False,
     ):
         self.client = client
         self.candidates = candidates
@@ -559,8 +743,12 @@ class LeagueUpdater:
         self.request_delay = max(0.0, request_delay)
         self.keep_stale = keep_stale
         self.export_details = export_details
+        self.force_beat = force_beat
+        self.last_auth_failed = False
 
     def run(self, selected: list[str]) -> tuple[dict[str, Any], bool]:
+        self.client.ensure_session_alive(force_beat=self.force_beat)
+
         league_date = kst_today()
         created_at = datetime.now(timezone.utc).isoformat()
         latest_path = self.output_dir / "league-anchors.json"
@@ -571,8 +759,12 @@ class LeagueUpdater:
         harvested: dict[int, Board] = {}
         probe_notes: dict[str, list[str]] = {league: [] for league in selected}
         direct_blocked = False
+        auth_failed = False
 
         for league in selected:
+            if auth_failed:
+                probe_notes[league].append("TikTok 로그인 세션 만료로 중단됨")
+                continue
             if direct_blocked:
                 probe_notes[league].append("직접 접속 차단으로 프록시 단계에 넘김")
                 continue
@@ -597,6 +789,12 @@ class LeagueUpdater:
                     if board.class_type == expected:
                         direct[expected] = board
                         break
+                except TikTokAuthError as error:
+                    message = f"@{candidate}: {error}"
+                    probe_notes[league].append(message)
+                    print(f"      인증 만료 오류 - 나머지 검사를 중단합니다: {error}")
+                    auth_failed = True
+                    break
                 except TikTokBlockedError as error:
                     message = f"@{candidate}: {error}"
                     probe_notes[league].append(message)
@@ -611,6 +809,7 @@ class LeagueUpdater:
                     if self.request_delay:
                         time.sleep(self.request_delay)
 
+        self.last_auth_failed = auth_failed
         rows: list[dict[str, Any]] = []
         leagues: dict[str, Any] = {}
         summary: list[dict[str, Any]] = []
@@ -729,6 +928,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ids-dir", type=Path, default=DEFAULT_IDS_DIR, help="a1.txt~d5.txt 폴더")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="결과 저장 폴더")
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH, help="unique_id -> user_id 캐시")
+    parser.add_argument("--session-file", type=Path, default=None, help="TikTok 세션/쿠키 상태 파일")
     parser.add_argument(
         "--league",
         action="append",
@@ -740,6 +940,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=20.0, help="HTTP 제한 시간 초 (기본 20)")
     parser.add_argument("--retries", type=int, default=2, help="일시적 오류 재시도 횟수 (기본 2)")
     parser.add_argument("--no-stale", action="store_true", help="실패한 리그의 이전 결과를 승계하지 않습니다")
+    parser.add_argument("--beat", action="store_true", help="실행 시작 시 token_beat를 강제로 실행합니다")
+    parser.add_argument("--no-beat", action="store_true", help="실행 시작 시 token_beat를 생략합니다")
     parser.add_argument(
         "--export-details",
         action="store_true",
@@ -755,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(SCRIPT_DIR / ".env")
     args = parse_args(argv)
 
+    client: TikTokClient | None = None
     try:
         candidates = load_candidate_files(args.ids_dir)
         selected = list(dict.fromkeys(args.league or LEAGUE_CODES))
@@ -762,29 +965,41 @@ def main(argv: list[str] | None = None) -> int:
             print("ID 파일 검사 완료")
             for league in selected:
                 print(f"  {league}: {len(candidates[league])}개")
-            return 0
+            return EXIT_OK
 
         token = os.environ.get("TIKTOK_TT_TOKEN", "")
         proxy_urls = parse_proxy_urls(os.environ.get("TIKTOK_PROXY_URLS", ""))
+        session_path = args.session_file or Path(
+            os.environ.get("TIKTOK_SESSION_FILE", "").strip() or str(args.output_dir / "tiktok-session.json")
+        )
+        persona_overrides = load_persona_overrides_from_env()
+        enable_beat = False if args.no_beat else env_bool("TIKTOK_TOKEN_BEAT", True)
+        beat_interval = env_float("TIKTOK_BEAT_INTERVAL_MINUTES", 60.0)
+
         client = TikTokClient(
             token,
             args.cache,
             timeout=args.timeout,
             retries=args.retries,
             proxy_urls=proxy_urls,
+            session_path=session_path,
+            persona_overrides=persona_overrides,
+            beat_interval_minutes=beat_interval,
+            enable_token_beat=enable_beat,
         )
         if args.resolve_only:
             value = normalize_handle(args.resolve_only)
             print(f"@{value} -> {client.resolve_user_id(value)}")
-            return 0
+            return EXIT_OK
 
-        if not token:
+        if not client.active_token:
             raise ConfigurationError(
-                f"{SCRIPT_DIR / '.env'} 파일을 만들고 TIKTOK_TT_TOKEN을 입력하세요"
+                f"{SCRIPT_DIR / '.env'}에 TIKTOK_TT_TOKEN을 입력하거나 tiktok_auth.py로 세션을 발급하세요"
             )
 
         print(f"대상: {', '.join(selected)}")
         print(f"결과 폴더: {args.output_dir}")
+        print(f"전송 계층: {client.signed_session.backend_name} (47.7.2 + TicketGuard)")
         print(f"프록시: {len(proxy_urls)}개" if proxy_urls else "프록시: 사용 안 함")
         updater = LeagueUpdater(
             client=client,
@@ -794,6 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
             request_delay=args.delay,
             keep_stale=not args.no_stale,
             export_details=args.export_details,
+            force_beat=args.beat,
         )
         snapshot, all_fresh = updater.run(selected)
         print("\n" + "=" * 68)
@@ -809,13 +1025,25 @@ def main(argv: list[str] | None = None) -> int:
             else args.output_dir / ("partial-" + "-".join(selected).lower() + ".json")
         )
         print(f"저장 완료: {saved_path}")
-        return 0 if all_fresh else 2
+        if updater.last_auth_failed:
+            print(
+                "인증 만료 오류: TIKTOK_TT_TOKEN 또는 세션을 새로 발급해 교체해야 합니다.",
+                file=sys.stderr,
+            )
+            return EXIT_AUTH
+        return EXIT_OK if all_fresh else EXIT_PARTIAL
     except KeyboardInterrupt:
         print("\n사용자가 작업을 중단했습니다", file=sys.stderr)
         return 130
+    except TikTokAuthError as error:
+        print(f"인증 만료 오류: {error}", file=sys.stderr)
+        return EXIT_AUTH
     except LeagueUpdaterError as error:
         print(f"오류: {error}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
+    finally:
+        if client is not None:
+            client.close()
 
 
 if __name__ == "__main__":
