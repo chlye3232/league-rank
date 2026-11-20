@@ -2,8 +2,12 @@ name: Refresh league rankings
 
 on:
   schedule:
-    # GitHub cron uses UTC: 03:00/15:00 UTC = 12:00/00:00 KST.
-    - cron: "0 3,15 * * *"
+    # Stagger groups so they do not normally start at the same time.
+    - cron: "45 */2 * * *"                         # A: every 2 hours
+    - cron: "25 0,3,6,9,12,15,18,21 * * *"       # B: every 90 minutes (part 1)
+    - cron: "55 1,4,7,10,13,16,19,22 * * *"      # B: every 90 minutes (part 2)
+    - cron: "15 * * * *"                          # C: every hour
+    - cron: "5,35 * * * *"                        # D: every 30 minutes
   workflow_dispatch:
     inputs:
       group:
@@ -44,11 +48,18 @@ jobs:
         id: group
         shell: bash
         run: |
+          schedule="${{ github.event.schedule }}"
           requested_leagues="${{ inputs.leagues || '' }}"
           if [ -n "$requested_leagues" ]; then
             value="custom"
           else
-            value="${{ inputs.group || 'all' }}"
+            case "$schedule" in
+              "45 */2 * * *") value="A" ;;
+              "25 0,3,6,9,12,15,18,21 * * *"|"55 1,4,7,10,13,16,19,22 * * *") value="B" ;;
+              "15 * * * *") value="C" ;;
+              "5,35 * * * *") value="D" ;;
+              *) value="${{ inputs.group || 'all' }}" ;;
+            esac
           fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
           echo "선택 그룹: $value"
@@ -59,6 +70,7 @@ jobs:
           path: |
             output/league-anchors.json
             output/retry-state.json
+            output/tiktok-session.json
             id_cache.json
             logs/refresh-history.jsonl
           key: league-state-${{ github.run_id }}
@@ -124,6 +136,8 @@ jobs:
         shell: bash
         env:
           TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+          TIKTOK_SESSION_JSON: ${{ secrets.TIKTOK_SESSION_JSON }}
+          TIKTOK_PERSONA_JSON: ${{ secrets.TIKTOK_PERSONA_JSON }}
           TIKTOK_PROXY_URLS: ""
         run: |
           log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-direct.log"
@@ -153,10 +167,12 @@ jobs:
 
       - name: Retry direct failures through purchased proxy
         id: proxy-refresh
-        if: steps.direct-record.outputs.failed_count != '0' && steps.proxies.outputs.available == 'true'
+        if: steps.direct-record.outputs.failed_count != '0' && steps.direct-record.outputs.auth_failed != 'true' && steps.proxies.outputs.available == 'true'
         shell: bash
         env:
           TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+          TIKTOK_SESSION_JSON: ${{ secrets.TIKTOK_SESSION_JSON }}
+          TIKTOK_PERSONA_JSON: ${{ secrets.TIKTOK_PERSONA_JSON }}
         run: |
           export TIKTOK_PROXY_URLS="$PURCHASED_PROXY_URLS"
           log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-proxy.log"
@@ -189,6 +205,11 @@ jobs:
         if: always()
         shell: bash
         run: |
+          if [ "${{ steps.direct-record.outputs.auth_failed }}" = "true" ] || [ "${{ steps.proxy-record.outputs.auth_failed }}" = "true" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "leagues=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ steps.proxy-refresh.outcome }}" != "skipped" ]; then
             leagues="${{ steps.proxy-record.outputs.failed }}"
           else
@@ -209,6 +230,8 @@ jobs:
         shell: bash
         env:
           TIKTOK_TT_TOKEN: ${{ secrets.TIKTOK_TT_TOKEN }}
+          TIKTOK_SESSION_JSON: ${{ secrets.TIKTOK_SESSION_JSON }}
+          TIKTOK_PERSONA_JSON: ${{ secrets.TIKTOK_PERSONA_JSON }}
         run: |
           export TIKTOK_PROXY_URLS="$PURCHASED_PROXY_URLS"
           log_file="logs/run-${GITHUB_RUN_ID}-${{ steps.group.outputs.value }}-delayed.log"
@@ -255,6 +278,7 @@ jobs:
           path: |
             output/league-anchors.json
             output/retry-state.json
+            output/tiktok-session.json
             id_cache.json
             logs/refresh-history.jsonl
           key: league-state-${{ github.run_id }}
@@ -272,6 +296,10 @@ jobs:
           retention-days: 90
 
       - name: Report unresolved collection failure
-        if: always() && steps.delayed-record.outputs.failed_count != '' && steps.delayed-record.outputs.failed_count != '0'
+        if: always() && (steps.direct-record.outputs.auth_failed == 'true' || steps.proxy-record.outputs.auth_failed == 'true' || (steps.delayed-record.outputs.failed_count != '' && steps.delayed-record.outputs.failed_count != '0'))
         shell: bash
-        run: exit 1
+        run: |
+          if [ "${{ steps.direct-record.outputs.auth_failed }}" = "true" ] || [ "${{ steps.proxy-record.outputs.auth_failed }}" = "true" ]; then
+            echo "::error::TikTok 로그인 세션(TIKTOK_TT_TOKEN)이 만료되었거나 유효하지 않습니다. 새 토큰 또는 TIKTOK_SESSION_JSON을 업데이트하세요."
+          fi
+          exit 1
